@@ -280,6 +280,107 @@ function formatReloadHint(): string {
   return "Run /reload, then pick the provider in /model.";
 }
 
+// ===================== /disguise presets =====================
+
+/**
+ * Disguise presets — header sets that make pi's requests look like they come
+ * from the official Codex CLI or Claude Code CLI. Values reverse-engineered
+ * from source (codex-rs) and the Claude Code binary.
+ *
+ * Header values support pi's config resolution: `$ENV_VAR` interpolates an
+ * environment variable, `!cmd` runs a shell command. The provider's `headers`
+ * field overrides pi's default `User-Agent: pi-coding-agent`.
+ */
+interface DisguisePreset {
+  id: string;
+  label: string;
+  description: string;
+  headers: Record<string, string>;
+}
+
+// Latest stable Codex release as of 2026-07-29 (github.com/openai/codex tag rust-v0.146.0).
+// Bump this when a new stable ships; editable below.
+const DEFAULT_CODEX_VERSION = "0.146.0";
+// Claude Code version (matches a real released CLI build on this machine).
+const DEFAULT_CLAUDE_VERSION = "2.1.195";
+
+// anthropic-beta tokens currently advertised by Claude Code (full set).
+const CLAUDE_BETA_TOKENS = [
+  "interleaved-thinking-2025-05-14",
+  "fine-grained-tool-streaming-2025-05-14",
+  "context-management-2025-06-27",
+  "files-api-2025-04-14",
+  "extended-cache-ttl-2025-04-11",
+  "prompt-caching-scope-2026-01-05",
+  "token-efficient-tools-2025-02-19",
+  "mcp-client-2025-11-20",
+  "skills-2025-10-02",
+  "managed-agents-2026-04-01",
+].join(",");
+
+function codexPreset(version: string): DisguisePreset {
+  // Real Codex UA format (openai/codex login/src/auth/default_client.rs get_codex_user_agent):
+  //   codex_cli_rs/{build_version} ({os_info::os_type()} {os_info::version()}; {arch}) {terminal_token}
+  // os_info crate returns: os_type="Arch", version="Unknown" on Arch Linux (verified at runtime).
+  // The terminal token comes from codex_terminal_detection::user_agent() (e.g. kitty).
+  // These defaults match this Arch Linux + kitty host; edit for other platforms.
+  const osToken = "Arch";
+  const osVersion = "Unknown";
+  const arch = "x86_64";
+  const terminalToken = "kitty";
+  return {
+    id: "codex",
+    label: "Codex CLI",
+    description: "openai-responses style: originator + codex User-Agent + OpenAI-Beta",
+    headers: {
+      "originator": "codex_cli_rs",
+      "User-Agent": `codex_cli_rs/${version} (${osToken} ${osVersion}; ${arch}) ${terminalToken}`,
+      // Sent on the plain-HTTP responses path by Codex.
+      "OpenAI-Beta": "responses=experimental",
+    },
+  };
+}
+
+function claudePreset(version: string): DisguisePreset {
+  // Real Claude Code UA (binary v2.1.195, getUserAgent() = m7):
+  //   claude-cli/{VERSION} (external, {CLAUDE_CODE_ENTRYPOINT ?? "cli"})
+  // The (external, cli) suffix is always present for a normal CLI run.
+  return {
+    id: "claude",
+    label: "Claude Code CLI",
+    description: "anthropic-messages style: anthropic-version/beta + x-app + claude User-Agent",
+    headers: {
+      "anthropic-version": "2023-06-01",
+      "anthropic-beta": CLAUDE_BETA_TOKENS,
+      "x-app": "cli",
+      "User-Agent": `claude-cli/${version} (external, cli)`,
+      "anthropic-client-platform": "claude-code",
+    },
+  };
+}
+
+/** Format a headers map as aligned `key: value` lines for preview. */
+function formatHeaders(headers: Record<string, string> | undefined): string {
+  if (!headers || Object.keys(headers).length === 0) return "  (none)";
+  const keys = Object.keys(headers).sort();
+  const width = Math.max(...keys.map((k) => k.length), 8);
+  return keys.map((k) => `  ${k.padEnd(width)}  ${headers[k]}`).join("\n");
+}
+
+/** Parse a `Key: Value` or `Key=Value` line into [key, value]. Returns null if blank/invalid. */
+function parseHeaderLine(line: string): [string, string] | null {
+  const raw = line.trim();
+  if (!raw) return null;
+  // Prefer the first `:` (HTTP headers use `:`), fall back to `=`.
+  const sep = raw.indexOf(":");
+  const idx = sep >= 0 ? sep : raw.indexOf("=");
+  if (idx <= 0) return null;
+  const key = raw.slice(0, idx).trim();
+  const val = raw.slice(idx + 1).trim();
+  if (!key) return null;
+  return [key, val];
+}
+
 export default function (pi: ExtensionAPI) {
   // ===================== /add-provider =====================
   pi.registerCommand("add-provider", {
@@ -727,6 +828,157 @@ export default function (pi: ExtensionAPI) {
         dirty ? formatReloadHint() : "",
       ].filter(Boolean).join("\n");
       ui.notify(head, dirty ? "info" : "warning");
+    },
+  });
+
+  // ===================== /disguise =====================
+  pi.registerCommand("disguise", {
+    description: "Disguise request headers so the upstream sees Codex CLI / Claude Code instead of pi",
+    handler: async (_args: string, ctx) => {
+      const path = MODELS_JSON();
+      const ui = ctx.ui;
+      if (!existsSync(path)) { ui.notify("models.json not found: " + path, "error"); return; }
+
+      let config: ModelsJsonConfig;
+      try { config = loadConfig(path); }
+      catch (e) { ui.notify(`Failed to parse models.json: ${(e as Error).message}`, "error"); return; }
+
+      const provNames = Object.keys(config.providers);
+      if (provNames.length === 0) {
+        ui.notify("No providers in models.json. Use /add-provider first.", "warning");
+        return;
+      }
+
+      // 1. Pick provider (with current disguise hint)
+      const provLabels = provNames.map((n) => {
+        const p = config.providers[n];
+        const count = p?.models?.length ?? 0;
+        const disguised = p?.headers && Object.keys(p.headers).length > 0;
+        const tag = disguised ? `  ·  disguised: ${Object.keys(p.headers!).length} hdrs` : "";
+        return `${n}  ·  ${count} models${tag}`;
+      });
+      const pickedLabel = await ui.select("Select a provider to disguise:", provLabels, {});
+      if (!pickedLabel) { ui.notify("Cancelled.", "info"); return; }
+      const provName = pickedLabel.split("  ·  ")[0].trim();
+      const provCfg = config.providers[provName];
+      if (!provCfg) { ui.notify(`Provider "${provName}" not found.`, "error"); return; }
+
+      // 2. Pick preset
+      const ACTIONS = {
+        codex: "Codex CLI  (originator + codex UA + OpenAI-Beta)",
+        claude: "Claude Code  (anthropic-version/beta + x-app + claude UA)",
+        custom: "Custom headers  (enter key: value lines)",
+        clear: "Clear disguise  (remove provider.headers)",
+        cancel: "Cancel",
+      } as const;
+      const action = await ui.select(
+        `Disguise ${provName} · choose a preset:`,
+        [ACTIONS.codex, ACTIONS.claude, ACTIONS.custom, ACTIONS.clear, ACTIONS.cancel],
+        {},
+      );
+      if (!action || action === ACTIONS.cancel) { ui.notify("Cancelled.", "info"); return; }
+
+      let newHeaders: Record<string, string> | undefined;
+      const report: string[] = [];
+
+      if (action === ACTIONS.clear) {
+        newHeaders = undefined;
+        report.push("Removing all disguise headers from provider.");
+      } else if (action === ACTIONS.codex || action === ACTIONS.claude) {
+        const isCodex = action === ACTIONS.codex;
+        // 3a. Version prompt (pre-filled with the default).
+        const defaultVer = isCodex ? DEFAULT_CODEX_VERSION : DEFAULT_CLAUDE_VERSION;
+        const verInput = (await ui.input(
+          `${isCodex ? "Codex" : "Claude Code"} version for User-Agent (enter to use ${defaultVer}):`,
+        ))?.trim();
+        const version = verInput || defaultVer;
+        const preset = isCodex ? codexPreset(version) : claudePreset(version);
+        newHeaders = { ...preset.headers };
+
+        // 3b. Optional extra/override headers (blank line to finish).
+        const extraChoice = await ui.confirm(
+          `Add extra or override headers?`,
+          `Merge additional headers on top of the ${preset.label} preset. Existing preset keys will be overwritten by your values.`,
+        );
+        if (extraChoice) {
+          ui.notify(
+            `Enter one header per line as \"Key: Value\" (or Key=Value). Submit an empty line to finish.\nCurrent preset:\n${formatHeaders(newHeaders)}`,
+            "info",
+          );
+          for (;;) {
+            const line = await ui.input("Header (empty to finish):");
+            if (line === undefined) { ui.notify("Cancelled.", "info"); return; }
+            if (!line.trim()) break;
+            const parsed = parseHeaderLine(line);
+            if (!parsed) { ui.notify(`Skipped invalid line: ${line}`, "warning"); continue; }
+            const [k, v] = parsed;
+            const existed = k in newHeaders!;
+            newHeaders![k] = v;
+            report.push(`${existed ? "~ override" : "+ add"}  ${k}: ${v}`);
+          }
+        }
+        report.unshift(`Applied ${preset.label} preset (version ${version}).`);
+      } else {
+        // 3c. Custom: enter headers line by line.
+        newHeaders = {};
+        ui.notify(
+          `Enter one header per line as \"Key: Value\" (or Key=Value). Submit an empty line to finish.`,
+          "info",
+        );
+        for (;;) {
+          const line = await ui.input("Header (empty to finish):");
+          if (line === undefined) { ui.notify("Cancelled.", "info"); return; }
+          if (!line.trim()) break;
+          const parsed = parseHeaderLine(line);
+          if (!parsed) { ui.notify(`Skipped invalid line: ${line}`, "warning"); continue; }
+          const [k, v] = parsed;
+          newHeaders[k] = v;
+          report.push(`+ ${k}: ${v}`);
+        }
+        if (Object.keys(newHeaders).length === 0) {
+          ui.notify("No headers entered. Cancelled.", "info");
+        }
+        report.unshift("Applied custom headers.");
+      }
+
+      if (newHeaders !== undefined && Object.keys(newHeaders).length === 0) {
+        // Custom produced nothing — treat as cancel.
+        return;
+      }
+
+      // 4. Preview diff
+      const before = provCfg.headers;
+      const preview = [
+        `Disguise ${provName}`,
+        "",
+        "Current headers:",
+        formatHeaders(before),
+        "",
+        "New headers:",
+        formatHeaders(newHeaders),
+        "",
+        ...report,
+      ].join("\n");
+      ui.notify(preview, "info");
+
+      // 5. Confirm + write
+      const ok = await ui.confirm(
+        `Write these headers to providers.${provName}?`,
+        `${newHeaders ? Object.keys(newHeaders).length + " header(s)" : "(remove headers)"} · ${formatReloadHint()}`,
+      );
+      if (!ok) { ui.notify("Cancelled.", "info"); return; }
+      if (newHeaders) provCfg.headers = newHeaders;
+      else delete provCfg.headers;
+      try { saveConfig(path, config); }
+      catch (e) { ui.notify(`Failed to write models.json: ${(e as Error).message}`, "error"); return; }
+      ui.notify(
+        [
+          `✓ Disguised ${provName}`,
+          newHeaders ? `  ${Object.keys(newHeaders).length} header(s) applied` : "  headers removed",
+          formatReloadHint(),
+        ].join("\n"),
+        "info",
+      );
     },
   });
 }

@@ -1,6 +1,6 @@
 # @superjeason/pi-model-manager
 
-Three pi commands for managing custom model providers in `~/.pi/agent/models.json`, with models.dev-first metadata enrichment.
+Four pi commands for managing custom model providers in `~/.pi/agent/models.json`, with models.dev-first metadata enrichment and request-header disguising.
 
 ## Commands
 
@@ -87,6 +87,26 @@ You can also set an explicit family on the provider or model:
 Tab completion is available for `preview` / `dry-run` / `force`.
 Use `force` when an older sparse/wrong `thinkingLevelMap` is stuck (safe mode never overwrites existing fields).
 
+### `/disguise` — disguise request headers
+
+Makes pi's outgoing requests look like they come from the official **Codex CLI** or **Claude Code** CLI, by writing a `headers` map onto the provider in `models.json`. pi's core natively merges configured `headers` into every request and they override pi's default `User-Agent: pi-coding-agent`. Header values support `$ENV_VAR` interpolation and `!cmd` shell commands (same resolution as API keys).
+
+Flow:
+1. Select a provider (the label shows whether it is already disguised and how many headers are set)
+2. Choose a preset:
+   - **Codex CLI** — `originator: codex_cli_rs`, `User-Agent: codex_cli_rs/<ver> (Arch Unknown; x86_64) kitty`, `OpenAI-Beta: responses=experimental`
+   - **Claude Code** — `anthropic-version: 2023-06-01`, `anthropic-beta: <full token list>`, `x-app: cli`, `User-Agent: claude-cli/<ver> (external, cli)`, `anthropic-client-platform: claude-code`
+   - **Custom headers** — enter `Key: Value` (or `Key=Value`) lines, blank line to finish
+   - **Clear disguise** — remove `provider.headers` entirely
+   - **Cancel**
+3. For Codex/Claude presets: enter a version for the `User-Agent` (pre-filled with a default), then optionally merge extra/override headers on top
+4. Preview the current → new header diff
+5. Confirm and write; run `/reload`
+
+The Codex preset targets `openai-responses` providers (originator + `OpenAI-Beta`). The Claude preset targets `anthropic-messages` providers (`anthropic-version`/`anthropic-beta`). Applying a Claude preset to an OpenAI-format provider is allowed but won't make sense — pick the preset that matches the upstream's expected protocol.
+
+Default versions (`DEFAULT_CODEX_VERSION`, `DEFAULT_CLAUDE_VERSION`) and the `anthropic-beta` token list are constants at the top of `index.ts`; edit them to keep current.
+
 ## Why
 
 Custom providers don't inherit authoritative model metadata. models.dev exposes model limits (`context`, `output`), modalities, `reasoning`, and provider-level `reasoning_options`; pi's built-in registry can also provide `compat` details. Without `thinkingLevelMap`, the `max` / `xhigh` thinking levels may be unavailable or clamped. These commands fill that in by matching model ids.
@@ -149,7 +169,7 @@ In non-TUI modes (RPC/print), falls back to one-by-one Add/Skip prompts.
 
 ```
 pi-model-manager/
-├── index.ts         # /add-provider + /edit-provider + /sync-model
+├── index.ts         # /add-provider + /edit-provider + /sync-model + /disguise
 ├── enrich.ts        # shared model-matching & config-filling
 ├── multi-select.ts  # themed multi-select TUI component
 ├── package.json
