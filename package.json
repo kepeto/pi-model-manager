@@ -7,6 +7,9 @@
     "pi-package"
   ],
   "type": "module",
+  "publishConfig": {
+    "access": "public"
+  },
   "repository": {
     "type": "git",
     "url": "git+https://github.com/SuperJeason/pi-model-manager.git"
