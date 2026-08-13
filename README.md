@@ -148,10 +148,13 @@ In non-TUI modes (RPC/print), falls back to one-by-one Add/Skip prompts.
   (`GET {baseUrl}/models` → `{"data":[{"id":"..."}]}`).  
   `baseUrl` with or without trailing `/v1` both work.  
   If the endpoint is missing (e.g. anthropic-messages / google-generative-ai), type ids manually.
-- Supports all built-in pi API formats: `openai-completions`, `openai-responses`,
-  `anthropic-messages`, `google-generative-ai`, `google-vertex`,
+- The API format picker is built **dynamically at runtime** from pi's api-provider
+  registry (`getApiProviders()` from `@earendil-works/pi-ai/compat`), so it always
+  matches the running pi: the 10 built-in formats (`openai-completions`,
+  `openai-responses`, `anthropic-messages`, `google-generative-ai`, `google-vertex`,
   `mistral-conversations`, `openai-codex-responses`, `azure-openai-responses`,
-  `bedrock-converse-stream`.
+  `bedrock-converse-stream`, `pi-messages`) plus any custom API types registered by
+  other extensions. No hardcoded list to go stale.
 - `models.json` must be pure JSON (no `//` comments).
 - Overwriting an existing provider prompts for confirmation; other providers untouched.
 - Enrich only adds missing fields; manual edits are never clobbered (unless you choose overwrite / `/sync-model force`).

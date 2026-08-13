@@ -12,6 +12,7 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { DynamicBorder, BorderedLoader } from "@earendil-works/pi-coding-agent";
 import { Container, type AutocompleteItem } from "@earendil-works/pi-tui";
+import { getApiProviders } from "@earendil-works/pi-ai/compat";
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { homedir } from "node:os";
@@ -193,18 +194,42 @@ async function fetchModelsWithUI(
   }
 }
 
-/** API formats supported by pi (aligned with BUILTIN_APIS). */
-const API_CHOICES: { id: string; label: string }[] = [
-  { id: "openai-completions", label: "openai-completions — Chat Completions (most proxies / local servers, recommended)" },
-  { id: "openai-responses", label: "openai-responses — Responses API (native OpenAI)" },
-  { id: "anthropic-messages", label: "anthropic-messages — Anthropic Messages API" },
-  { id: "google-generative-ai", label: "google-generative-ai — Google Generative AI" },
-  { id: "google-vertex", label: "google-vertex — Vertex AI" },
-  { id: "mistral-conversations", label: "mistral-conversations — Mistral Conversations API" },
-  { id: "openai-codex-responses", label: "openai-codex-responses — Codex Responses (subscription)" },
-  { id: "azure-openai-responses", label: "azure-openai-responses — Azure OpenAI Responses" },
-  { id: "bedrock-converse-stream", label: "bedrock-converse-stream — AWS Bedrock Converse" },
-];
+/** Curated one-line descriptions for the built-in pi API formats. */
+const API_LABELS: Record<string, string> = {
+  "openai-completions": "Chat Completions (most proxies / local servers, recommended)",
+  "openai-responses": "Responses API (native OpenAI)",
+  "anthropic-messages": "Anthropic Messages API",
+  "google-generative-ai": "Google Generative AI",
+  "google-vertex": "Vertex AI",
+  "mistral-conversations": "Mistral Conversations API",
+  "openai-codex-responses": "Codex Responses (subscription)",
+  "azure-openai-responses": "Azure OpenAI Responses",
+  "bedrock-converse-stream": "AWS Bedrock Converse",
+  "pi-messages": "pi Messages protocol (Radius gateway)",
+};
+
+/**
+ * API formats available at runtime.
+ *
+ * Read live from pi's api-provider registry instead of a hardcoded list, so the
+ * picker always matches the running pi: the 10 built-in formats (BUILTIN_APIS in
+ * @earendil-works/pi-ai/compat, incl. `pi-messages`) plus any custom API types
+ * registered by other extensions via registerApiProvider(). The registry is
+ * populated before extensions load, so built-ins come first in canonical order.
+ */
+function getApiChoices(): { id: string; label: string }[] {
+  const apis = getApiProviders();
+  if (apis.length === 0) {
+    // Defensive fallback if the registry is unavailable: known built-ins only.
+    return Object.entries(API_LABELS).map(([id, desc]) => ({ id, label: `${id} — ${desc}` }));
+  }
+  return apis.map((p) => {
+    const desc = API_LABELS[p.api];
+    return desc
+      ? { id: p.api, label: `${p.api} — ${desc}` }
+      : { id: p.api, label: `${p.api} — custom API (registered by extension)` };
+  });
+}
 
 function loadConfig(path: string): ModelsJsonConfig {
   if (!existsSync(path)) return { providers: {} };
@@ -402,7 +427,7 @@ export default function (pi: ExtensionAPI) {
 
       const apiChoice = await ui.select(
         "API type (request/response format):",
-        API_CHOICES.map((a) => a.label),
+        getApiChoices().map((a) => a.label),
         {},
       );
       if (!apiChoice) { ui.notify("Cancelled.", "info"); return; }
@@ -607,10 +632,10 @@ export default function (pi: ExtensionAPI) {
       // ---------- Change API format ----------
       if (action === ACTIONS.api) {
         const current = typeof provCfg.api === "string" ? provCfg.api : "";
-        const curLabel = API_CHOICES.find((a) => a.id === current)?.label ?? current ?? "(empty)";
+        const curLabel = getApiChoices().find((a) => a.id === current)?.label ?? current ?? "(empty)";
         const picked = await ui.select(
           `New API format (current: ${curLabel}):`,
-          [...API_CHOICES.map((a) => a.label), "(remove field)"],
+          [...getApiChoices().map((a) => a.label), "(remove field)"],
           {},
         );
         if (!picked) { ui.notify("Cancelled.", "info"); return; }
