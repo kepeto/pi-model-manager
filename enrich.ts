@@ -389,9 +389,10 @@ export function dictFromRegistry(ctx: ExtensionContext, customProviderNames: Set
 export async function createEnrichContext(
   ctx: ExtensionContext,
   customProviderNames: Set<string>,
+  opts?: { forceRefresh?: boolean },
 ): Promise<EnrichContext> {
   const builtIn = dictFromRegistry(ctx, customProviderNames);
-  const modelsDev = await getModelsDevIndex().catch(() => undefined);
+  const modelsDev = await getModelsDevIndex(opts?.forceRefresh === true).catch(() => undefined);
   return { builtIn, modelsDev };
 }
 
@@ -452,8 +453,8 @@ function writeCache<T>(name: string, data: T): void {
   writeFileSync(cachePath(name), JSON.stringify({ ts: Date.now(), data }), "utf-8");
 }
 
-async function fetchJsonWithCache<T>(url: string, cacheName: string): Promise<T> {
-  const fresh = readCache<T>(cacheName);
+async function fetchJsonWithCache<T>(url: string, cacheName: string, forceRefresh = false): Promise<T> {
+  const fresh = forceRefresh ? undefined : readCache<T>(cacheName);
   if (fresh) return fresh;
   try {
     const res = await fetch(url, {
@@ -845,10 +846,10 @@ function buildModelsDevIndex(
   return { exact, bare };
 }
 
-export async function getModelsDevIndex(): Promise<ModelsDevIndex> {
+export async function getModelsDevIndex(forceRefresh = false): Promise<ModelsDevIndex> {
   const [modelsJson, apiJson] = await Promise.all([
-    fetchJsonWithCache<Record<string, ModelsDevRawModel>>(MODELS_DEV_MODELS_URL, "models-dev-models.json"),
-    fetchJsonWithCache<Record<string, ModelsDevProvider>>(MODELS_DEV_API_URL, "models-dev-api.json"),
+    fetchJsonWithCache<Record<string, ModelsDevRawModel>>(MODELS_DEV_MODELS_URL, "models-dev-models.json", forceRefresh),
+    fetchJsonWithCache<Record<string, ModelsDevProvider>>(MODELS_DEV_API_URL, "models-dev-api.json", forceRefresh),
   ]);
   return buildModelsDevIndex(modelsJson, apiJson);
 }

@@ -80,7 +80,7 @@ You can also set an explicit family on the provider or model:
 ```
 /sync-model              # fill missing fields, write back
 /sync-model preview      # show what would change without writing
-/sync-model force        # clear enrichable fields, then re-match (rewrites maps)
+/sync-model force        # refresh models.dev cache, clear fields, then re-match (rewrites maps)
 /sync-model force preview
 ```
 
@@ -163,7 +163,7 @@ In non-TUI modes (RPC/print), falls back to one-by-one Add/Skip prompts.
 - Optional `modelFamily` on provider or model overrides family inference.
 - `cost` is filled when missing or all zeros (common custom-provider placeholders); non-zero user costs are kept.
 - models.dev `models.json` has limits/modalities; pricing usually comes from `api.json` and is merged in.
-- models.dev responses are cached under `~/.cache/pi-model-manager/` for 7 days; stale cache is used if refresh fails.
+- models.dev responses are cached under `~/.cache/pi-model-manager/` for 7 days; stale cache is used if refresh fails. `/sync-model force` bypasses the TTL, fetches fresh metadata, and updates both cache files before re-enriching models.
 - Uses pi theme tokens for multi-select colors and focus state (`selectedBg`, `accent`, `success`, `dim`, `muted`, `warning`).
 - Focused rows use a full-width `selectedBg` band plus an accent bar (`▌`); checked rows use `[x]` without stealing focus.
 - Runtime deps: Node built-ins only; peer: `@earendil-works/pi-coding-agent` (provides `pi-tui`).

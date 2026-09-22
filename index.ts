@@ -556,7 +556,7 @@ export default function (pi: ExtensionAPI) {
       }
 
       const customNames = new Set(Object.keys(config.providers));
-      const enrichCtx = await createEnrichContext(ctx, customNames);
+      const enrichCtx = await createEnrichContext(ctx, customNames, { forceRefresh: force });
 
       const all: ReturnType<typeof enrichProvider>[] = [];
       let changed = 0, matched = 0, noMatch = 0;
