@@ -56,6 +56,8 @@ export interface LikeModel {
 }
 
 export interface ProviderConfig {
+  /** Optional tool profile override for this provider during /pim:sync. */
+  metadataTool?: ToolProfile;
   baseUrl?: string;
   api?: string;
   apiKey?: string;
@@ -79,12 +81,23 @@ export interface EnrichSource extends LikeModel {
 export interface EnrichContext {
   builtIn: Map<string, LikeModel>;
   modelsDev?: ModelsDevIndex;
-  fallbackModelsDev?: ModelsDevIndex;
-  selectedSource?: MetadataSource;
+  toolIndex?: ModelsDevIndex;
   templates?: Map<string, EnrichSource>;
+  toolProfile?: ToolProfile;
+  selectedToolProvider?: string;
+  toolsSourceLabel?: string;
 }
 
-export type MetadataSource = "models.dev" | "codex" | "kilo" | "antigravity";
+export type ToolProfile = "codex" | "kilo" | "gemini-cli" | "antigravity";
+
+interface CodexCatalogModel {
+  slug?: string;
+  display_name?: string;
+  context_window?: number;
+  max_context_window?: number;
+  input_modalities?: string[];
+  supported_reasoning_levels?: Array<{ effort?: string }>;
+}
 
 interface KiloCatalogModel {
   id?: string;
@@ -98,6 +111,7 @@ interface KiloCatalogModel {
 }
 
 const KILO_MODELS_URL = "https://api.kilo.ai/api/gateway/models";
+const CODEX_MODELS_URL = "https://raw.githubusercontent.com/openai/codex/main/codex-rs/models-manager/models.json";
 const BUNDLED_TEMPLATE_MODELS: Record<string, LikeModel> = {
   "gpt-6-luna": { id: "gpt-6-luna", name: "GPT-6 Luna", reasoning: true, contextWindow: 272000, maxTokens: 128000 },
   "gpt-6-sol": { id: "gpt-6-sol", name: "GPT-6 Sol", reasoning: true, contextWindow: 272000, maxTokens: 128000 },
@@ -416,34 +430,120 @@ export function dictFromRegistry(ctx: ExtensionContext, customProviderNames: Set
 export async function createEnrichContext(
   ctx: ExtensionContext,
   customProviderNames: Set<string>,
-  opts?: { forceRefresh?: boolean; source?: MetadataSource },
+  opts?: { forceRefresh?: boolean },
 ): Promise<EnrichContext> {
   const builtIn = dictFromRegistry(ctx, customProviderNames);
-  const source = opts?.source ?? "models.dev";
-  let modelsDev: ModelsDevIndex | undefined;
+  const modelsDev = await getModelsDevIndex(opts?.forceRefresh === true).catch(() => undefined);
+  return { builtIn, modelsDev };
+}
+
+export async function createToolEnrichContext(
+  ctx: ExtensionContext,
+  customProviderNames: Set<string>,
+  tool: ToolProfile,
+  providerName: string,
+  opts?: { forceRefresh?: boolean },
+): Promise<EnrichContext> {
+  const builtIn = dictFromRegistry(ctx, customProviderNames);
+  // The caller refreshes models.dev once before iterating configured providers.
+  const modelsDev = await getModelsDevIndex(opts?.forceRefresh === true).catch(() => undefined);
+  let toolIndex: ModelsDevIndex | undefined;
   let templates: Map<string, EnrichSource> | undefined;
-  let fallbackModelsDev: ModelsDevIndex | undefined;
-  if (source === "models.dev") {
-    modelsDev = await getModelsDevIndex(opts?.forceRefresh === true).catch(() => undefined);
-  } else if (source === "kilo") {
-    modelsDev = await getKiloModelsDevIndex(opts?.forceRefresh === true).catch(() => undefined);
-    fallbackModelsDev = await getModelsDevIndex(opts?.forceRefresh === true).catch(() => undefined);
-    templates = new Map(Object.entries(BUNDLED_TEMPLATE_MODELS).map(([id, model]) => [
-      normalizeId(id), { ...model, sourceLabel: "bundled/Codex catalog snapshot (fallback)" },
+  let toolsSourceLabel = "models.dev only; tool limit unavailable";
+
+  if (tool === "codex") {
+    templates = await getCodexModelsDevTemplates(false).catch(() => undefined);
+    if (templates?.size) {
+      toolsSourceLabel = "Codex public bundled model catalog";
+    } else {
+      templates = new Map(Object.entries(BUNDLED_TEMPLATE_MODELS).map(([id, model]) => [
+        normalizeId(id), { ...model, sourceLabel: "Codex bundled profile fallback (snapshot)" },
+      ]));
+      toolsSourceLabel = "Codex bundled profile fallback (remote catalog unavailable)";
+    }
+  } else if (tool === "kilo") {
+    toolIndex = await getKiloModelsDevIndex(false).catch(() => undefined);
+    toolsSourceLabel = toolIndex ? "Kilo Gateway public catalog" : "Kilo unavailable; models.dev fallback";
+  } else if (tool === "gemini-cli") {
+    templates = new Map(Object.entries(GEMINI_CLI_MODELS).map(([id, model]) => [
+      normalizeId(id), { ...model, sourceLabel: "Gemini CLI official token-limit table" },
     ]));
-  } else if (source === "codex") {
-    templates = new Map(Object.entries(BUNDLED_TEMPLATE_MODELS).map(([id, model]) => [
-      normalizeId(id), { ...model, sourceLabel: "bundled/Codex catalog snapshot (default; max override not represented)" },
-    ]));
-  } else if (source === "antigravity") {
-    // No public Antigravity per-account context catalog is available; use models.dev as model-spec fallback.
-    modelsDev = await getModelsDevIndex(opts?.forceRefresh === true).catch(() => undefined);
+    toolsSourceLabel = "Gemini CLI official token-limit table (snapshot)";
+  } else if (tool === "antigravity") {
+    // No public IDE/CLI model context profile is available; keep models.dev model specs.
+    toolsSourceLabel = "Antigravity IDE/CLI limit unavailable; models.dev model spec retained";
   }
-  return { builtIn, modelsDev, fallbackModelsDev, selectedSource: source, templates };
+
+  return {
+    builtIn,
+    modelsDev,
+    templates,
+    toolIndex,
+    toolProfile: tool,
+    selectedToolProvider: providerName,
+    toolsSourceLabel,
+  };
+}
+
+const GEMINI_CLI_MODELS: Record<string, LikeModel> = {
+  "gemini-3.8-flash": { id: "gemini-3.8-flash", contextWindow: 1048576, maxTokens: 65536 },
+  "gemini-3.7-flash": { id: "gemini-3.7-flash", contextWindow: 1048576, maxTokens: 65536 },
+  "gemini-3.6-flash": { id: "gemini-3.6-flash", contextWindow: 1048576, maxTokens: 65536 },
+  "gemini-3.5-flash-lite": { id: "gemini-3.5-flash-lite", contextWindow: 1048576, maxTokens: 65536 },
+  "gemini-3.1-flash-lite": { id: "gemini-3.1-flash-lite", contextWindow: 1048576, maxTokens: 65536 },
+};
+
+async function getCodexModelsDevTemplates(forceRefresh = false): Promise<Map<string, EnrichSource>> {
+  const response = await fetchJsonWithCache<{ models?: CodexCatalogModel[] }>(CODEX_MODELS_URL, "codex-models.json", forceRefresh);
+  const templates = new Map<string, EnrichSource>();
+  for (const model of response.models ?? []) {
+    if (!model.slug || typeof model.context_window !== "number") continue;
+    templates.set(normalizeId(model.slug), {
+      id: model.slug,
+      name: model.display_name,
+      contextWindow: model.context_window,
+      input: sanitizePiInputModalities(model.input_modalities),
+      reasoning: (model.supported_reasoning_levels?.length ?? 0) > 0 ? true : undefined,
+      sourceLabel: `Codex public bundled catalog (default ${model.context_window}; max override ${model.max_context_window ?? "unknown"})`,
+    });
+  }
+  return templates;
+}
+
+async function fetchKiloModelsCatalog(forceRefresh = false): Promise<{ data?: KiloCatalogModel[] }> {
+  return fetchJsonWithCache<{ data?: KiloCatalogModel[] }>(KILO_MODELS_URL, "kilo-models.json", forceRefresh);
+}
+
+export async function refreshKiloProfileCache(forceRefresh = true): Promise<void> {
+  await fetchKiloModelsCatalog(forceRefresh);
+}
+
+export async function refreshCodexProfileCache(forceRefresh = true): Promise<void> {
+  await getCodexModelsDevTemplates(forceRefresh);
+}
+
+export function getMetadataCacheStatus(): string[] {
+  const files = [
+    "models-dev-models.json",
+    "models-dev-api.json",
+    "kilo-models.json",
+    "codex-models.json",
+  ];
+  return files.map((name) => {
+    const path = cachePath(name);
+    try {
+      const raw = JSON.parse(readFileSync(path, "utf-8")) as { ts?: number };
+      const checkedAt = raw.ts ? new Date(raw.ts).toISOString() : "timestamp unknown";
+      const age = raw.ts ? `${Math.max(0, Math.floor((Date.now() - raw.ts) / 60000))}m old` : "age unknown";
+      return `${name}: ${checkedAt} (${age})`;
+    } catch {
+      return `${name}: not cached`;
+    }
+  });
 }
 
 async function getKiloModelsDevIndex(forceRefresh = false): Promise<ModelsDevIndex> {
-  const data = await fetchJsonWithCache<{ data?: KiloCatalogModel[] }>(KILO_MODELS_URL, "kilo-models.json", forceRefresh);
+  const data = await fetchKiloModelsCatalog(forceRefresh);
   const models: Record<string, ModelsDevRawModel> = {};
   for (const model of data.data ?? []) {
     if (!model?.id) continue;
@@ -538,6 +638,30 @@ async function fetchJsonWithCache<T>(url: string, cacheName: string, forceRefres
     if (stale) return stale;
     throw e;
   }
+}
+
+function lookupToolTemplate(ctx: EnrichContext, id: string, providerCfg?: ProviderConfig): EnrichSource | undefined {
+  const n = normalizeId(id);
+  const full = ctx.templates?.get(n);
+  if (full) return full;
+  if (ctx.toolProfile === "kilo") {
+    const kiloRoute = normalizeId(id).replace(/^kilo-free\//, "").replace(/^kilo\//, "");
+    const routeHit = ctx.toolIndex?.exact.get(kiloRoute)?.[0] ?? ctx.toolIndex?.exact.get(normalizeId(id))?.[0];
+    if (routeHit) return { ...routeHit.model, sourceLabel: "Kilo Gateway exact route" };
+    // The free Kilo endpoint can route aliases; only use its model catalog when
+    // the provider itself is explicitly Kilo or the id carries its namespace.
+    if (!/^kilo-free\//.test(normalizeId(id)) && !/kilo/i.test(providerCfg?.baseUrl ?? "") && !/kilo/i.test(providerCfg?.api ?? "")) return undefined;
+  }
+  const bare = bareId(id);
+  if (ctx.toolProfile === "kilo" && /^kilo-free\//.test(normalizeId(id))) return undefined;
+  // Bare aliases are accepted only for explicitly recognized first-party IDs.
+  if (/^gpt-(?:6-(?:luna|sol|astra)|5\\.6-(?:luna|terra|sol)|5\\.5)$/.test(bare)) {
+    return ctx.templates?.get(bare);
+  }
+  if (/^gemini-(?:3\\.(?:8|7|6)-flash|3\\.5-flash-lite|3\\.1-flash-lite)$/.test(bare)) {
+    return ctx.templates?.get(bare);
+  }
+  return undefined;
 }
 
 function mapEffortValuesToThinkingLevelMap(values: unknown[], mandatory = false): ThinkingLevelMap | undefined {
@@ -1109,28 +1233,38 @@ export function enrichModel(
   const enrichCtx: EnrichContext = ctx instanceof Map ? { builtIn: ctx } : ctx;
   const families = resolvePreferredFamilies(m, opts);
 
-  const modelsDevSrc = lookupModelsDevModel(enrichCtx.modelsDev, m.id, families)
-    ?? lookupModelsDevModel(enrichCtx.fallbackModelsDev, m.id, families);
-  const templateSrc = enrichCtx.templates?.get(normalizeId(m.id)) ?? enrichCtx.templates?.get(bareId(m.id));
+  const modelsDevSrc = lookupModelsDevModel(enrichCtx.modelsDev, m.id, families);
+  const exactToolProviderMatch = enrichCtx.toolProfile !== undefined && enrichCtx.selectedToolProvider === opts?.providerName;
+  const toolSrc = exactToolProviderMatch
+    ? lookupToolTemplate(enrichCtx, m.id, opts?.providerCfg) ?? lookupModelsDevModel(enrichCtx.toolIndex, m.id, families)
+    : undefined;
   const builtInSrc = lookupBuiltInModel(enrichCtx.builtIn, m.id, families);
-  const primarySrc = enrichCtx.selectedSource === "kilo"
-    ? modelsDevSrc ?? templateSrc
-    : templateSrc ?? modelsDevSrc;
 
-  if (primarySrc) {
-    const taggedSource = {
-      ...primarySrc,
-      sourceLabel: primarySrc.sourceLabel ?? (enrichCtx.selectedSource === "kilo" && primarySrc.provider !== "models.dev" ? "Kilo Gateway" : enrichCtx.selectedSource === "antigravity" ? "models.dev/model-spec fallback (Antigravity limits unavailable)" : enrichCtx.selectedSource ?? "models.dev"),
-    };
-    const patches = applyModelPatch(m, taggedSource);
+  if (modelsDevSrc) {
+    const patches = applyModelPatch(m, modelsDevSrc);
+    let primarySource: EnrichSource = modelsDevSrc;
+    if (toolSrc) {
+      // models.dev supplies the complete model spec; tool profiles override only
+      // effective route context/output values for the assigned provider.
+      if (toolSrc.contextWindow !== undefined && m.contextWindow !== toolSrc.contextWindow) {
+        m.contextWindow = toolSrc.contextWindow;
+        patches.push("contextWindow");
+      }
+      if (toolSrc.maxTokens !== undefined && m.maxTokens !== toolSrc.maxTokens) {
+        m.maxTokens = toolSrc.maxTokens;
+        patches.push("maxTokens");
+      }
+      primarySource = { ...modelsDevSrc, sourceLabel: `${modelsDevSrc.sourceLabel ?? "models.dev"} + ${toolSrc.sourceLabel ?? enrichCtx.toolsSourceLabel ?? "tool profile"}` };
+    }
     if (builtInSrc) {
       for (const p of applyModelPatch(m, builtInSrc)) {
         if (!patches.includes(p)) patches.push(p);
       }
     }
-    return [patches, taggedSource];
+    return [patches, primarySource];
   }
 
-  if (!builtInSrc) return [[], undefined];
-  return [applyModelPatch(m, builtInSrc), builtInSrc];
+  const fallbackSrc = toolSrc ?? builtInSrc;
+  if (!fallbackSrc) return [[], undefined];
+  return [applyModelPatch(m, fallbackSrc), fallbackSrc];
 }

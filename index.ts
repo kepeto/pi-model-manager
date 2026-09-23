@@ -19,31 +19,39 @@ import { homedir } from "node:os";
 import {
   clearEnrichableFields,
   createEnrichContext,
+  createToolEnrichContext,
+  getMetadataCacheStatus,
+  refreshKiloProfileCache,
+  refreshCodexProfileCache,
   enrichModel,
   type EnrichContext,
   type EnrichSource,
   type LikeModel,
   type ModelsJsonConfig,
   type ProviderConfig,
+  type ToolProfile,
 } from "./enrich.js";
 import { MultiSelect, type MultiSelectItem, type MultiSelectTheme } from "./multi-select.js";
 
 const MODELS_JSON = () => join(homedir(), ".pi", "agent", "models.json");
 
 const SYNC_MODEL_ARGUMENTS: AutocompleteItem[] = [
-  { value: "source=models.dev", label: "source=models.dev", description: "Use models.dev metadata (default)" },
-  { value: "source=models.dev force", label: "source=models.dev force", description: "Refresh models.dev cache and re-enrich" },
-  { value: "source=models.dev force preview", label: "source=models.dev force preview", description: "Preview after refreshing models.dev metadata" },
-  { value: "source=codex", label: "source=codex", description: "Use the bundled Codex context-limit catalog template" },
-  { value: "source=kilo", label: "source=kilo", description: "Use the public Kilo Gateway catalog, with models.dev fallback" },
-  { value: "source=kilo force", label: "source=kilo force", description: "Refresh Kilo Gateway catalog and re-enrich" },
-  { value: "source=kilo force preview", label: "source=kilo force preview", description: "Preview after refreshing Kilo Gateway metadata" },
-  { value: "source=antigravity", label: "source=antigravity", description: "Use the Antigravity model template, with models.dev fallback" },
+  { value: "tool=kilo", label: "tool=kilo", description: "Use the matching Kilo Gateway route profile" },
+  { value: "tool=kilo preview", label: "tool=kilo preview", description: "Preview Kilo profile sync" },
+  { value: "tool=codex", label: "tool=codex", description: "Use Codex profile where provider metadataTool is codex" },
+  { value: "tool=codex preview", label: "tool=codex preview", description: "Preview Codex profile sync" },
+  { value: "tool=gemini-cli", label: "tool=gemini-cli", description: "Use Gemini CLI limits where provider metadataTool is gemini-cli" },
+  { value: "tool=antigravity", label: "tool=antigravity", description: "Keep models.dev specs; Antigravity IDE/CLI cap unknown" },
+  { value: "tool=gemini-cli", label: "tool=gemini-cli", description: "Use Gemini CLI limits where metadataTool is assigned" },
+  { value: "models", label: "models", description: "Use models.dev metadata only" },
+  { value: "models preview", label: "models preview", description: "Preview models.dev-only sync" },
   { value: "preview", label: "preview", description: "Show what would change without writing models.json" },
   { value: "dry-run", label: "dry-run", description: "Alias for preview" },
   { value: "dryrun", label: "dryrun", description: "Alias for preview" },
   { value: "force", label: "force", description: "Clear enrichable fields, then re-match (rewrites thinkingLevelMap etc.)" },
-  { value: "force preview", label: "force preview", description: "Preview force re-enrich without writing" },
+  { value: "force preview", label: "force preview", description: "Preview after refreshing selected metadata sources" },
+  { value: "status", label: "status", description: "Show current cached metadata source status" },
+  { value: "help", label: "help", description: "Show sync modes and per-provider tool-profile assignment" },
 ];
 
 function completeSyncModelArgs(prefix: string): AutocompleteItem[] | null {
@@ -257,6 +265,16 @@ function sourceLabel(src: EnrichSource): string {
 
 function sourceRef(src: EnrichSource): string {
   return `${sourceLabel(src)}/${src.id}`;
+}
+
+function inferToolForProvider(name: string, cfg: ProviderConfig): ToolProfile | undefined {
+  if (cfg.metadataTool) return cfg.metadataTool;
+  const key = `${name} ${cfg.baseUrl ?? ""} ${cfg.api ?? ""}`.toLowerCase();
+  if (/kilo/.test(key) || (cfg.models ?? []).some((model) => /^kilo-free\//i.test(model.id))) return "kilo";
+  if (/antigravity|googleapis\.com\/v1beta\/interactions/.test(key)) return "antigravity";
+  if (/gemini-cli/.test(key)) return "gemini-cli";
+  if (/codex/.test(key)) return "codex";
+  return undefined;
 }
 
 /** Enrich every model under a provider; return report lines + counters. */
@@ -534,7 +552,7 @@ export default function (pi: ExtensionAPI) {
 
   // ===================== /pim:sync =====================
   pi.registerCommand("pim:sync", {
-    description: "Use models.dev first (canonical family preferred), then built-in models, to fill missing thinkingLevelMap / context / maxTokens, etc. Use 'force' to rewrite.",
+    description: "Refresh metadata caches and sync provider limits from per-provider tool profiles, or models.dev only.",
     getArgumentCompletions: completeSyncModelArgs,
     handler: async (args: string, ctx) => {
       const path = MODELS_JSON();
@@ -544,8 +562,13 @@ export default function (pi: ExtensionAPI) {
       const rawArgs = args ?? "";
       const dryRun = /\b(preview|dry-run|dryrun)\b/i.test(rawArgs);
       const force = /\bforce\b/i.test(rawArgs);
-      const sourceMatch = rawArgs.match(/\bsource=(models\.dev|codex|kilo|antigravity)\b/i);
-      const source = (sourceMatch?.[1]?.toLowerCase() ?? "models.dev") as "models.dev" | "codex" | "kilo" | "antigravity";
+      const modelsOnly = /\bmodels\b/i.test(rawArgs);
+      const statusOnly = /\bstatus\b/i.test(rawArgs);
+      const helpOnly = /\bhelp\b/i.test(rawArgs);
+      const toolMatch = rawArgs.match(/\btool=(codex|kilo|gemini-cli|antigravity)\b/i);
+      const explicitTool = toolMatch?.[1]?.toLowerCase() as ToolProfile | undefined;
+      const providerMatch = rawArgs.match(/\bprovider=([a-z0-9][a-z0-9._-]*)\b/i);
+      const selectedProvider = providerMatch?.[1];
       let config: ModelsJsonConfig;
       try { config = loadConfig(path); }
       catch (e) {
@@ -558,33 +581,76 @@ export default function (pi: ExtensionAPI) {
 
       if (force && !dryRun) {
         const ok = await ui.confirm(
-          "Force re-enrich all custom models?",
-          "Clears thinkingLevelMap / cost / compat / maxTokens / contextWindow / input / name on every model, then re-matches models.dev (canonical family preferred) and built-in. reasoning and modelFamily are kept.",
+          "Refresh metadata and replace the source cache?",
+          "Fetch current models.dev and selected tool catalogs, replace their cache snapshots, then re-enrich models. Tool context profiles only apply to the provider assigned that tool.",
         );
         if (!ok) { ui.notify("Cancelled.", "info"); return; }
       }
 
       const customNames = new Set(Object.keys(config.providers));
-      const enrichCtx = await createEnrichContext(ctx, customNames, { forceRefresh: force, source });
-
-      const all: ReturnType<typeof enrichProvider>[] = [];
+      if (selectedProvider && !config.providers[selectedProvider]) {
+        ui.notify(`Provider "${selectedProvider}" not found. Known providers: ${[...customNames].join(", ")}`, "error");
+        return;
+      }
+      if (helpOnly) {
+        ui.notify([
+          "/pim:sync — refresh models.dev plus assigned per-provider tool profiles; write resolved models.json",
+          "/pim:sync models — refresh/use models.dev only",
+          "/pim:sync tool=kilo|codex|gemini-cli|antigravity — override only providers assigned that metadataTool",
+          "/pim:sync provider=<name> tool=<tool> — one-run override for exactly one provider",
+          "/pim:sync preview — fetch/replace caches and preview without writing models.json",
+          "/pim:sync status — inspect metadata cache timestamps",
+          "Set providers.<name>.metadataTool in models.json for persistent per-provider tool assignment.",
+        ].join("\n"), "info");
+        return;
+      }
+      if (statusOnly) {
+        const status = await getMetadataCacheStatus();
+        ui.notify(status.join("\n"), "info");
+        return;
+      }
+      if (modelsOnly) await createEnrichContext(ctx, customNames, { forceRefresh: true });
+      else await Promise.all([
+        createEnrichContext(ctx, customNames, { forceRefresh: true }),
+        ...Object.entries(config.providers)
+          .map(([providerName, providerCfg]) => explicitTool ?? providerCfg.metadataTool ?? inferToolForProvider(providerName, providerCfg))
+          .filter((tool): tool is ToolProfile => Boolean(tool))
+          .filter((tool, index, tools) => tools.indexOf(tool) === index)
+          .map((tool) => {
+            if (tool === "kilo") return refreshKiloProfileCache(true).catch(() => undefined);
+            if (tool === "codex") return refreshCodexProfileCache(true).catch(() => undefined);
+            return Promise.resolve();
+          }),
+      ]);
+      const baseCtx = await createEnrichContext(ctx, customNames, { forceRefresh: false });
       let changed = 0, matched = 0, noMatch = 0;
+      const all: ReturnType<typeof enrichProvider>[] = [];
       for (const [provName, provCfg] of Object.entries(config.providers)) {
+        const isSelectedProvider = !selectedProvider || selectedProvider === provName;
+        const assignedTool = provCfg.metadataTool ?? inferToolForProvider(provName, provCfg);
+        const profile = modelsOnly ? undefined : selectedProvider
+          ? isSelectedProvider ? explicitTool ?? assignedTool : assignedTool
+          : explicitTool ? (assignedTool === explicitTool ? explicitTool : undefined) : assignedTool;
+        const enrichCtx = profile
+          ? await createToolEnrichContext(ctx, customNames, profile, provName, { forceRefresh: true })
+          : baseCtx;
         const r = enrichProvider(provName, provCfg, enrichCtx, { force });
         all.push(r);
-        changed += r.changed; matched += r.matched; noMatch += r.noMatch;
+        changed += r.changed;
+        matched += r.matched;
+        noMatch += r.noMatch;
       }
 
-      if (changed > 0 && !dryRun) saveConfig(path, config);
+      if (!dryRun) saveConfig(path, config);
 
       const report = all.flatMap((r) => r.report);
       const modeTag = [
-        dryRun ? "preview · not written" : "",
-        force ? "force" : "",
+        dryRun ? "preview · models.json not written" : "source caches refreshed",
+        modelsOnly ? "models.dev only" : selectedProvider ? `provider=${selectedProvider}${explicitTool ? ` tool=${explicitTool}` : ""}` : explicitTool ? `tool=${explicitTool} on assigned providers` : "per-provider tool profiles",
       ].filter(Boolean).join(" · ");
       const head =
-        `${modeTag ? `[${modeTag}] ` : ""}/pim:sync: matched ${matched} · enriched ${changed} · no match ${noMatch} · source=${source}` +
-        (changed > 0 && !dryRun ? `\nWrote models.json. ${formatReloadHint()}` : "");
+        `[${modeTag}] /pim:sync: matched ${matched} · enriched ${changed} · no match ${noMatch}` +
+        (!dryRun ? `\nWrote models.json. ${formatReloadHint()}` : "");
       ui.notify([head, "", ...report].join("\n"), changed > 0 || dryRun ? "info" : "warning");
     },
   });

@@ -78,18 +78,18 @@ You can also set an explicit family on the provider or model:
 ```
 
 ```
-/pim:sync              # fill missing fields, write back
-/pim:sync preview      # show what would change without writing
-/pim:sync force        # refresh selected source, clear fields, then re-match
-/pim:sync force preview
-/pim:sync source=models.dev
-/pim:sync source=codex  # bundled Codex context-limit snapshot
-/pim:sync source=kilo   # public Kilo Gateway catalog, then models.dev
-/pim:sync source=antigravity
+/pim:sync                              # refresh models.dev and assigned tool-profile caches
+/pim:sync models                       # refresh/use models.dev only
+/pim:sync tool=kilo                    # overlay providers assigned metadataTool=kilo
+/pim:sync tool=codex                   # overlay providers assigned metadataTool=codex
+/pim:sync provider=cpa tool=kilo       # one-run Kilo override for provider cpa only
+/pim:sync models preview               # preview models.dev-only result
+/pim:sync provider=cpa tool=kilo preview
+/pim:sync status                       # show cache timestamps
+/pim:sync help                         # explain modes and provider assignment
 ```
 
-Tab completion is available for `preview`, `dry-run`, `force`, and `source=...` selectors.
-Use `force` when an older sparse/wrong `thinkingLevelMap` is stuck (safe mode never overwrites existing fields).
+Tab completion is available for `models`, `tool=...`, `provider=...`, `preview`, and `status`. Every sync refreshes models.dev and the selected/assigned tool catalog cache; `preview` skips only the models.json write. Existing metadata fields are replaced by the newly resolved model and route data on each sync.
 
 ### `/pim:headers` — manage request headers
 
@@ -167,10 +167,11 @@ In non-TUI modes (RPC/print), falls back to one-by-one Add/Skip prompts.
 - Optional `modelFamily` on provider or model overrides family inference.
 - `cost` is filled when missing or all zeros (common custom-provider placeholders); non-zero user costs are kept.
 - models.dev `models.json` has limits/modalities; pricing usually comes from `api.json` and is merged in.
-- `/pim:sync` defaults to `source=models.dev`; select `source=kilo` for Kilo Gateway's public catalog, `source=codex` for the bundled Codex context-limit snapshot, or `source=antigravity` for model metadata when no public Antigravity account catalog is available.
-- `source=kilo` reads `https://api.kilo.ai/api/gateway/models` (no local Kilo installation required); models missing there fall back to models.dev.
-- The Codex snapshot is predefined metadata maintained by this package; it is not fetched from Codex and can become stale. It reflects Codex's observed default context only; Codex's separate 872K maximum override is not expressible in pi's single `contextWindow` field. Antigravity has no unauthenticated public per-account limits catalog, so its mode uses models.dev metadata and must not be interpreted as Antigravity service limits.
-- models.dev and Kilo responses are cached under `~/.cache/pi-model-manager/` for 7 days; stale cache is used if refresh fails. `/pim:sync force` bypasses the selected source's cache TTL and refreshes metadata before re-enriching.
+- `/pim:sync` always fetches models.dev `models.json` + `api.json`, replaces their cache snapshots, and resolves every configured model anew. Assigned tool profiles overlay only the effective `contextWindow`/`maxTokens` for a strongly matched provider route; other fields remain from models.dev or Pi built-ins.
+- Assign a profile per provider with `metadataTool` in `models.json` (`codex`, `kilo`, `gemini-cli`, or `antigravity`). A one-run override is scoped explicitly with `provider=<name> tool=<tool>`; `/pim:sync tool=kilo` applies only to providers already assigned/inferred as Kilo. Set `metadataTool` explicitly for predictable persistent behavior.
+- `/pim:sync models` refreshes and uses models.dev without tool overlays. Preview still refreshes/replaces source caches but does not write `models.json`; sync writes the refreshed resolution even if values match the previous file.
+- Kilo data comes from `https://api.kilo.ai/api/gateway/models`; route IDs must match before it overrides. Codex context profiles refresh from the public `openai/codex` bundled `models.json`; account-specific Codex runtime catalogs are not available without authentication. The bundled profile is isolated to providers assigned `metadataTool: "codex"`. Gemini CLI uses its official model token limits. Antigravity IDE/CLI effective context is not publicly specified, so its profile retains models.dev model limits and labels the harness cap unknown (no 135K managed-agent threshold is applied to the IDE/CLI).
+- Metadata caches live in `~/.cache/pi-model-manager/`; `/pim:sync status` shows timestamps. On fetch failure, the last cached snapshot is retained and the report identifies its provenance.
 - Uses pi theme tokens for multi-select colors and focus state (`selectedBg`, `accent`, `success`, `dim`, `muted`, `warning`).
 - Focused rows use a full-width `selectedBg` band plus an accent bar (`▌`); checked rows use `[x]` without stealing focus.
 - Runtime deps: Node built-ins only; peer: `@earendil-works/pi-coding-agent` (provides `pi-tui`).
