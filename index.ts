@@ -31,6 +31,14 @@ import { MultiSelect, type MultiSelectItem, type MultiSelectTheme } from "./mult
 const MODELS_JSON = () => join(homedir(), ".pi", "agent", "models.json");
 
 const SYNC_MODEL_ARGUMENTS: AutocompleteItem[] = [
+  { value: "source=models.dev", label: "source=models.dev", description: "Use models.dev metadata (default)" },
+  { value: "source=models.dev force", label: "source=models.dev force", description: "Refresh models.dev cache and re-enrich" },
+  { value: "source=models.dev force preview", label: "source=models.dev force preview", description: "Preview after refreshing models.dev metadata" },
+  { value: "source=codex", label: "source=codex", description: "Use the bundled Codex context-limit catalog template" },
+  { value: "source=kilo", label: "source=kilo", description: "Use the public Kilo Gateway catalog, with models.dev fallback" },
+  { value: "source=kilo force", label: "source=kilo force", description: "Refresh Kilo Gateway catalog and re-enrich" },
+  { value: "source=kilo force preview", label: "source=kilo force preview", description: "Preview after refreshing Kilo Gateway metadata" },
+  { value: "source=antigravity", label: "source=antigravity", description: "Use the Antigravity model template, with models.dev fallback" },
   { value: "preview", label: "preview", description: "Show what would change without writing models.json" },
   { value: "dry-run", label: "dry-run", description: "Alias for preview" },
   { value: "dryrun", label: "dryrun", description: "Alias for preview" },
@@ -40,7 +48,6 @@ const SYNC_MODEL_ARGUMENTS: AutocompleteItem[] = [
 
 function completeSyncModelArgs(prefix: string): AutocompleteItem[] | null {
   const p = prefix.trimStart().toLowerCase();
-  if (p.includes(" ")) return null;
   const filtered = SYNC_MODEL_ARGUMENTS.filter((item) => item.value.startsWith(p));
   return filtered.length > 0 ? filtered : null;
 }
@@ -537,6 +544,8 @@ export default function (pi: ExtensionAPI) {
       const rawArgs = args ?? "";
       const dryRun = /\b(preview|dry-run|dryrun)\b/i.test(rawArgs);
       const force = /\bforce\b/i.test(rawArgs);
+      const sourceMatch = rawArgs.match(/\bsource=(models\.dev|codex|kilo|antigravity)\b/i);
+      const source = (sourceMatch?.[1]?.toLowerCase() ?? "models.dev") as "models.dev" | "codex" | "kilo" | "antigravity";
       let config: ModelsJsonConfig;
       try { config = loadConfig(path); }
       catch (e) {
@@ -556,7 +565,7 @@ export default function (pi: ExtensionAPI) {
       }
 
       const customNames = new Set(Object.keys(config.providers));
-      const enrichCtx = await createEnrichContext(ctx, customNames, { forceRefresh: force });
+      const enrichCtx = await createEnrichContext(ctx, customNames, { forceRefresh: force, source });
 
       const all: ReturnType<typeof enrichProvider>[] = [];
       let changed = 0, matched = 0, noMatch = 0;
@@ -574,7 +583,7 @@ export default function (pi: ExtensionAPI) {
         force ? "force" : "",
       ].filter(Boolean).join(" · ");
       const head =
-        `${modeTag ? `[${modeTag}] ` : ""}/sync-model: matched ${matched} · enriched ${changed} · no match ${noMatch} · source models.dev(canonical)→built-in` +
+        `${modeTag ? `[${modeTag}] ` : ""}/sync-model: matched ${matched} · enriched ${changed} · no match ${noMatch} · source=${source}` +
         (changed > 0 && !dryRun ? `\nWrote models.json. ${formatReloadHint()}` : "");
       ui.notify([head, "", ...report].join("\n"), changed > 0 || dryRun ? "info" : "warning");
     },

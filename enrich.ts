@@ -79,7 +79,34 @@ export interface EnrichSource extends LikeModel {
 export interface EnrichContext {
   builtIn: Map<string, LikeModel>;
   modelsDev?: ModelsDevIndex;
+  fallbackModelsDev?: ModelsDevIndex;
+  selectedSource?: MetadataSource;
+  templates?: Map<string, EnrichSource>;
 }
+
+export type MetadataSource = "models.dev" | "codex" | "kilo" | "antigravity";
+
+interface KiloCatalogModel {
+  id?: string;
+  name?: string;
+  context_length?: number;
+  max_completion_tokens?: number;
+  top_provider?: { context_length?: number; max_completion_tokens?: number };
+  architecture?: { input_modalities?: string[] };
+  supported_parameters?: string[];
+  pricing?: Record<string, unknown>;
+}
+
+const KILO_MODELS_URL = "https://api.kilo.ai/api/gateway/models";
+const BUNDLED_TEMPLATE_MODELS: Record<string, LikeModel> = {
+  "gpt-6-luna": { id: "gpt-6-luna", name: "GPT-6 Luna", reasoning: true, contextWindow: 272000, maxTokens: 128000 },
+  "gpt-6-sol": { id: "gpt-6-sol", name: "GPT-6 Sol", reasoning: true, contextWindow: 272000, maxTokens: 128000 },
+  "gpt-6-astra": { id: "gpt-6-astra", name: "GPT-6 Astra", reasoning: true, contextWindow: 272000, maxTokens: 128000 },
+  "gpt-5.6-luna": { id: "gpt-5.6-luna", name: "GPT-5.6 Luna", reasoning: true, contextWindow: 272000, maxTokens: 128000 },
+  "gpt-5.6-terra": { id: "gpt-5.6-terra", name: "GPT-5.6 Terra", reasoning: true, contextWindow: 272000, maxTokens: 128000 },
+  "gpt-5.6-sol": { id: "gpt-5.6-sol", name: "GPT-5.6 Sol", reasoning: true, contextWindow: 272000, maxTokens: 128000 },
+  "gpt-5.5": { id: "gpt-5.5", name: "GPT-5.5", reasoning: true, contextWindow: 272000, maxTokens: 128000 },
+};
 
 export interface EnrichOptions {
   /** Custom provider name from models.json. */
@@ -389,11 +416,49 @@ export function dictFromRegistry(ctx: ExtensionContext, customProviderNames: Set
 export async function createEnrichContext(
   ctx: ExtensionContext,
   customProviderNames: Set<string>,
-  opts?: { forceRefresh?: boolean },
+  opts?: { forceRefresh?: boolean; source?: MetadataSource },
 ): Promise<EnrichContext> {
   const builtIn = dictFromRegistry(ctx, customProviderNames);
-  const modelsDev = await getModelsDevIndex(opts?.forceRefresh === true).catch(() => undefined);
-  return { builtIn, modelsDev };
+  const source = opts?.source ?? "models.dev";
+  let modelsDev: ModelsDevIndex | undefined;
+  let templates: Map<string, EnrichSource> | undefined;
+  let fallbackModelsDev: ModelsDevIndex | undefined;
+  if (source === "models.dev") {
+    modelsDev = await getModelsDevIndex(opts?.forceRefresh === true).catch(() => undefined);
+  } else if (source === "kilo") {
+    modelsDev = await getKiloModelsDevIndex(opts?.forceRefresh === true).catch(() => undefined);
+    fallbackModelsDev = await getModelsDevIndex(opts?.forceRefresh === true).catch(() => undefined);
+    templates = new Map(Object.entries(BUNDLED_TEMPLATE_MODELS).map(([id, model]) => [
+      normalizeId(id), { ...model, sourceLabel: "bundled/Codex catalog snapshot (fallback)" },
+    ]));
+  } else if (source === "codex") {
+    templates = new Map(Object.entries(BUNDLED_TEMPLATE_MODELS).map(([id, model]) => [
+      normalizeId(id), { ...model, sourceLabel: "bundled/Codex catalog snapshot (default; max override not represented)" },
+    ]));
+  } else if (source === "antigravity") {
+    // No public Antigravity per-account context catalog is available; use models.dev as model-spec fallback.
+    modelsDev = await getModelsDevIndex(opts?.forceRefresh === true).catch(() => undefined);
+  }
+  return { builtIn, modelsDev, fallbackModelsDev, selectedSource: source, templates };
+}
+
+async function getKiloModelsDevIndex(forceRefresh = false): Promise<ModelsDevIndex> {
+  const data = await fetchJsonWithCache<{ data?: KiloCatalogModel[] }>(KILO_MODELS_URL, "kilo-models.json", forceRefresh);
+  const models: Record<string, ModelsDevRawModel> = {};
+  for (const model of data.data ?? []) {
+    if (!model?.id) continue;
+    const context = model.top_provider?.context_length ?? model.context_length;
+    const output = model.top_provider?.max_completion_tokens ?? model.max_completion_tokens;
+    models[model.id] = {
+      id: model.id,
+      name: model.name,
+      limit: { context, output },
+      modalities: { input: model.architecture?.input_modalities },
+      reasoning: model.supported_parameters?.includes("reasoning") || model.supported_parameters?.includes("reasoning_effort"),
+      cost: model.pricing,
+    };
+  }
+  return buildModelsDevIndex(models, {});
 }
 
 function normalizeId(id: string): string {
@@ -1044,18 +1109,26 @@ export function enrichModel(
   const enrichCtx: EnrichContext = ctx instanceof Map ? { builtIn: ctx } : ctx;
   const families = resolvePreferredFamilies(m, opts);
 
-  const modelsDevSrc = lookupModelsDevModel(enrichCtx.modelsDev, m.id, families);
+  const modelsDevSrc = lookupModelsDevModel(enrichCtx.modelsDev, m.id, families)
+    ?? lookupModelsDevModel(enrichCtx.fallbackModelsDev, m.id, families);
+  const templateSrc = enrichCtx.templates?.get(normalizeId(m.id)) ?? enrichCtx.templates?.get(bareId(m.id));
   const builtInSrc = lookupBuiltInModel(enrichCtx.builtIn, m.id, families);
+  const primarySrc = enrichCtx.selectedSource === "kilo"
+    ? modelsDevSrc ?? templateSrc
+    : templateSrc ?? modelsDevSrc;
 
-  if (modelsDevSrc) {
-    const patches = applyModelPatch(m, modelsDevSrc);
+  if (primarySrc) {
+    const taggedSource = {
+      ...primarySrc,
+      sourceLabel: primarySrc.sourceLabel ?? (enrichCtx.selectedSource === "kilo" && primarySrc.provider !== "models.dev" ? "Kilo Gateway" : enrichCtx.selectedSource === "antigravity" ? "models.dev/model-spec fallback (Antigravity limits unavailable)" : enrichCtx.selectedSource ?? "models.dev"),
+    };
+    const patches = applyModelPatch(m, taggedSource);
     if (builtInSrc) {
-      // Secondary pass: fill remaining gaps (especially compat) from built-in.
       for (const p of applyModelPatch(m, builtInSrc)) {
         if (!patches.includes(p)) patches.push(p);
       }
     }
-    return [patches, modelsDevSrc];
+    return [patches, taggedSource];
   }
 
   if (!builtInSrc) return [[], undefined];

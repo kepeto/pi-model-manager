@@ -80,11 +80,15 @@ You can also set an explicit family on the provider or model:
 ```
 /sync-model              # fill missing fields, write back
 /sync-model preview      # show what would change without writing
-/sync-model force        # refresh models.dev cache, clear fields, then re-match (rewrites maps)
+/sync-model force        # refresh selected source, clear fields, then re-match
 /sync-model force preview
+/sync-model source=models.dev
+/sync-model source=codex  # bundled Codex context-limit snapshot
+/sync-model source=kilo   # public Kilo Gateway catalog, then models.dev
+/sync-model source=antigravity
 ```
 
-Tab completion is available for `preview` / `dry-run` / `force`.
+Tab completion is available for `preview`, `dry-run`, `force`, and `source=...` selectors.
 Use `force` when an older sparse/wrong `thinkingLevelMap` is stuck (safe mode never overwrites existing fields).
 
 ### `/disguise` — disguise request headers
@@ -163,7 +167,10 @@ In non-TUI modes (RPC/print), falls back to one-by-one Add/Skip prompts.
 - Optional `modelFamily` on provider or model overrides family inference.
 - `cost` is filled when missing or all zeros (common custom-provider placeholders); non-zero user costs are kept.
 - models.dev `models.json` has limits/modalities; pricing usually comes from `api.json` and is merged in.
-- models.dev responses are cached under `~/.cache/pi-model-manager/` for 7 days; stale cache is used if refresh fails. `/sync-model force` bypasses the TTL, fetches fresh metadata, and updates both cache files before re-enriching models.
+- `/sync-model` defaults to `source=models.dev`; select `source=kilo` for Kilo Gateway's public catalog, `source=codex` for the bundled Codex context-limit snapshot, or `source=antigravity` for model metadata when no public Antigravity account catalog is available.
+- `source=kilo` reads `https://api.kilo.ai/api/gateway/models` (no local Kilo installation required); models missing there fall back to models.dev.
+- The Codex snapshot is predefined metadata maintained by this package; it is not fetched from Codex and can become stale. It reflects Codex's observed default context only; Codex's separate 872K maximum override is not expressible in pi's single `contextWindow` field. Antigravity has no unauthenticated public per-account limits catalog, so its mode uses models.dev metadata and must not be interpreted as Antigravity service limits.
+- models.dev and Kilo responses are cached under `~/.cache/pi-model-manager/` for 7 days; stale cache is used if refresh fails. `/sync-model force` bypasses the selected source's cache TTL and refreshes metadata before re-enriching.
 - Uses pi theme tokens for multi-select colors and focus state (`selectedBg`, `accent`, `success`, `dim`, `muted`, `warning`).
 - Focused rows use a full-width `selectedBg` band plus an accent bar (`▌`); checked rows use `[x]` without stealing focus.
 - Runtime deps: Node built-ins only; peer: `@earendil-works/pi-coding-agent` (provides `pi-tui`).
