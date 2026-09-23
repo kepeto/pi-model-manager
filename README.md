@@ -4,7 +4,7 @@ Four pi commands for managing custom model providers in `~/.pi/agent/models.json
 
 ## Commands
 
-### `/add-provider` — interactive wizard
+### `/pim:add` — interactive wizard
 
 Adds a new OpenAI-compatible provider end-to-end:
 
@@ -13,12 +13,12 @@ Adds a new OpenAI-compatible provider end-to-end:
 3. Fetches `{baseUrl}/models` (standard OpenAI format) with a cancellable loader
 4. Multi-select models (**Space** toggle, **Enter** confirm, **Esc** cancel)
    - If `/models` fetch fails, type model ids manually (comma-separated)
-5. Optionally enrich config from models.dev first, then the built-in pi-ai library (same logic as `/sync-model`)
+5. Optionally enrich config from models.dev first, then the built-in pi-ai library (same logic as `/pim:sync`)
 6. Writes the provider to `models.json`
 
 Then `/reload` and the new provider appears in `/model`.
 
-### `/edit-provider` — modify an existing provider
+### `/pim:edit` — modify an existing provider
 
 Select a provider (shown with model count and baseUrl), then choose an action:
 
@@ -36,7 +36,7 @@ Select a provider (shown with model count and baseUrl), then choose an action:
 
 All destructive ops ask for confirmation first.
 
-### `/sync-model` — fill missing model config
+### `/pim:sync` — fill missing model config
 
 Reads `models.json`, matches each custom model **by id** against models.dev first, then built-in models loaded at runtime, and fills fields you didn't set:
 
@@ -78,20 +78,20 @@ You can also set an explicit family on the provider or model:
 ```
 
 ```
-/sync-model              # fill missing fields, write back
-/sync-model preview      # show what would change without writing
-/sync-model force        # refresh selected source, clear fields, then re-match
-/sync-model force preview
-/sync-model source=models.dev
-/sync-model source=codex  # bundled Codex context-limit snapshot
-/sync-model source=kilo   # public Kilo Gateway catalog, then models.dev
-/sync-model source=antigravity
+/pim:sync              # fill missing fields, write back
+/pim:sync preview      # show what would change without writing
+/pim:sync force        # refresh selected source, clear fields, then re-match
+/pim:sync force preview
+/pim:sync source=models.dev
+/pim:sync source=codex  # bundled Codex context-limit snapshot
+/pim:sync source=kilo   # public Kilo Gateway catalog, then models.dev
+/pim:sync source=antigravity
 ```
 
 Tab completion is available for `preview`, `dry-run`, `force`, and `source=...` selectors.
 Use `force` when an older sparse/wrong `thinkingLevelMap` is stuck (safe mode never overwrites existing fields).
 
-### `/disguise` — disguise request headers
+### `/pim:headers` — manage request headers
 
 Makes pi's outgoing requests look like they come from the official **Codex CLI** or **Claude Code** CLI, by writing a `headers` map onto the provider in `models.json`. pi's core natively merges configured `headers` into every request and they override pi's default `User-Agent: pi-coding-agent`. Header values support `$ENV_VAR` interpolation and `!cmd` shell commands (same resolution as API keys).
 
@@ -148,7 +148,7 @@ In non-TUI modes (RPC/print), falls back to one-by-one Add/Skip prompts.
 
 ## Requirements & Notes
 
-- `/add-provider` prefers a standard OpenAI-compatible `/models` endpoint  
+- `/pim:add` prefers a standard OpenAI-compatible `/models` endpoint
   (`GET {baseUrl}/models` → `{"data":[{"id":"..."}]}`).  
   `baseUrl` with or without trailing `/v1` both work.  
   If the endpoint is missing (e.g. anthropic-messages / google-generative-ai), type ids manually.
@@ -161,16 +161,16 @@ In non-TUI modes (RPC/print), falls back to one-by-one Add/Skip prompts.
   other extensions. No hardcoded list to go stale.
 - `models.json` must be pure JSON (no `//` comments).
 - Overwriting an existing provider prompts for confirmation; other providers untouched.
-- Enrich only adds missing fields; manual edits are never clobbered (unless you choose overwrite / `/sync-model force`).
+- Enrich only adds missing fields; manual edits are never clobbered (unless you choose overwrite / `/pim:sync force`).
 - Metadata source order: models.dev `models.json` + `api.json` first (canonical family preferred), then pi built-in registry.
 - Bare ids like `gpt-5.5` prefer `openai/gpt-5.5` over reseller copies (`vivgrid`, `302ai`, …).
 - Optional `modelFamily` on provider or model overrides family inference.
 - `cost` is filled when missing or all zeros (common custom-provider placeholders); non-zero user costs are kept.
 - models.dev `models.json` has limits/modalities; pricing usually comes from `api.json` and is merged in.
-- `/sync-model` defaults to `source=models.dev`; select `source=kilo` for Kilo Gateway's public catalog, `source=codex` for the bundled Codex context-limit snapshot, or `source=antigravity` for model metadata when no public Antigravity account catalog is available.
+- `/pim:sync` defaults to `source=models.dev`; select `source=kilo` for Kilo Gateway's public catalog, `source=codex` for the bundled Codex context-limit snapshot, or `source=antigravity` for model metadata when no public Antigravity account catalog is available.
 - `source=kilo` reads `https://api.kilo.ai/api/gateway/models` (no local Kilo installation required); models missing there fall back to models.dev.
 - The Codex snapshot is predefined metadata maintained by this package; it is not fetched from Codex and can become stale. It reflects Codex's observed default context only; Codex's separate 872K maximum override is not expressible in pi's single `contextWindow` field. Antigravity has no unauthenticated public per-account limits catalog, so its mode uses models.dev metadata and must not be interpreted as Antigravity service limits.
-- models.dev and Kilo responses are cached under `~/.cache/pi-model-manager/` for 7 days; stale cache is used if refresh fails. `/sync-model force` bypasses the selected source's cache TTL and refreshes metadata before re-enriching.
+- models.dev and Kilo responses are cached under `~/.cache/pi-model-manager/` for 7 days; stale cache is used if refresh fails. `/pim:sync force` bypasses the selected source's cache TTL and refreshes metadata before re-enriching.
 - Uses pi theme tokens for multi-select colors and focus state (`selectedBg`, `accent`, `success`, `dim`, `muted`, `warning`).
 - Focused rows use a full-width `selectedBg` band plus an accent bar (`▌`); checked rows use `[x]` without stealing focus.
 - Runtime deps: Node built-ins only; peer: `@earendil-works/pi-coding-agent` (provides `pi-tui`).
@@ -179,7 +179,7 @@ In non-TUI modes (RPC/print), falls back to one-by-one Add/Skip prompts.
 
 ```
 pi-model-manager/
-├── index.ts         # /add-provider + /edit-provider + /sync-model + /disguise
+├── index.ts         # /pim:add + /pim:edit + /pim:sync + /pim:headers
 ├── enrich.ts        # shared model-matching & config-filling
 ├── multi-select.ts  # themed multi-select TUI component
 ├── package.json

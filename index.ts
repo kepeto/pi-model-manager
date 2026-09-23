@@ -3,9 +3,9 @@
  *
  * Commands share one "match models.dev / built-in model by id and fill missing fields" path:
  *
- *   /add-provider  Interactive OpenAI-compatible provider wizard
- *   /edit-provider Edit existing provider (models, connection, enrich, delete)
- *   /sync-model    Fill missing fields on custom models from models.dev, then built-in library
+ *   /pim:add      Add an OpenAI-compatible provider
+ *   /pim:edit     Edit an existing provider
+ *   /pim:sync     Sync model metadata
  *
  * Only missing fields are filled; existing values are preserved. Idempotent.
  */
@@ -312,7 +312,7 @@ function formatReloadHint(): string {
   return "Run /reload, then pick the provider in /model.";
 }
 
-// ===================== /disguise presets =====================
+// ===================== /pim:headers presets =====================
 
 /**
  * Disguise presets — header sets that make pi's requests look like they come
@@ -414,8 +414,8 @@ function parseHeaderLine(line: string): [string, string] | null {
 }
 
 export default function (pi: ExtensionAPI) {
-  // ===================== /add-provider =====================
-  pi.registerCommand("add-provider", {
+  // ===================== /pim:add =====================
+  pi.registerCommand("pim:add", {
     description: "Interactively add an OpenAI-compatible provider (fetch models + optional enrich)",
     handler: async (_args: string, ctx) => {
       const path = MODELS_JSON();
@@ -532,8 +532,8 @@ export default function (pi: ExtensionAPI) {
     },
   });
 
-  // ===================== /sync-model =====================
-  pi.registerCommand("sync-model", {
+  // ===================== /pim:sync =====================
+  pi.registerCommand("pim:sync", {
     description: "Use models.dev first (canonical family preferred), then built-in models, to fill missing thinkingLevelMap / context / maxTokens, etc. Use 'force' to rewrite.",
     getArgumentCompletions: completeSyncModelArgs,
     handler: async (args: string, ctx) => {
@@ -583,14 +583,14 @@ export default function (pi: ExtensionAPI) {
         force ? "force" : "",
       ].filter(Boolean).join(" · ");
       const head =
-        `${modeTag ? `[${modeTag}] ` : ""}/sync-model: matched ${matched} · enriched ${changed} · no match ${noMatch} · source=${source}` +
+        `${modeTag ? `[${modeTag}] ` : ""}/pim:sync: matched ${matched} · enriched ${changed} · no match ${noMatch} · source=${source}` +
         (changed > 0 && !dryRun ? `\nWrote models.json. ${formatReloadHint()}` : "");
       ui.notify([head, "", ...report].join("\n"), changed > 0 || dryRun ? "info" : "warning");
     },
   });
 
-  // ===================== /edit-provider =====================
-  pi.registerCommand("edit-provider", {
+  // ===================== /pim:edit =====================
+  pi.registerCommand("pim:edit", {
     description: "Edit a provider: models, connection, API format, enrich, or delete",
     handler: async (_args: string, ctx) => {
       const path = MODELS_JSON();
@@ -603,7 +603,7 @@ export default function (pi: ExtensionAPI) {
 
       const provNames = Object.keys(config.providers);
       if (provNames.length === 0) {
-        ui.notify("No providers in models.json. Use /add-provider first.", "warning");
+        ui.notify("No providers in models.json. Use /pim:add first.", "warning");
         return;
       }
 
@@ -856,7 +856,7 @@ export default function (pi: ExtensionAPI) {
         catch (e) { ui.notify(`Failed to write models.json: ${(e as Error).message}`, "error"); return; }
       }
       const head = [
-        `/edit-provider · ${provName}`,
+        `/pim:edit · ${provName}`,
         ...report,
         dirty ? "" : "(no changes)",
         dirty ? formatReloadHint() : "",
@@ -865,9 +865,9 @@ export default function (pi: ExtensionAPI) {
     },
   });
 
-  // ===================== /disguise =====================
-  pi.registerCommand("disguise", {
-    description: "Disguise request headers so the upstream sees Codex CLI / Claude Code instead of pi",
+  // ===================== /pim:headers =====================
+  pi.registerCommand("pim:headers", {
+    description: "Manage provider request headers and Codex/Claude presets",
     handler: async (_args: string, ctx) => {
       const path = MODELS_JSON();
       const ui = ctx.ui;
@@ -879,7 +879,7 @@ export default function (pi: ExtensionAPI) {
 
       const provNames = Object.keys(config.providers);
       if (provNames.length === 0) {
-        ui.notify("No providers in models.json. Use /add-provider first.", "warning");
+        ui.notify("No providers in models.json. Use /pim:add first.", "warning");
         return;
       }
 
