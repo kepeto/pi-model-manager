@@ -566,17 +566,17 @@ function normalizeId(id: string): string {
     .trim()
     .toLowerCase()
     .replace(/^~+/, "")
-    .replace(/:free$/, "")
     .replace(/_/g, "-");
 }
 
 function providerAlias(id: string): string {
   return id
+    .replace(/^(?:kilo-free|nous-portal-free|opencode-free|openrouter-free)\//, "")
+    .replace(/^kilo\//, "")
     .replace(/^x-ai\//, "xai/")
     .replace(/^z-ai\//, "zhipuai/")
     .replace(/^zai\//, "zhipuai/")
     .replace(/^qwen\//, "alibaba/")
-    .replace(/^moonshotai\//, "moonshotai/")
     .replace(/^moonshot\//, "moonshotai/")
     .replace(/^xiaomimimo\//, "xiaomi/")
     .replace(/^doubao\//, "volcengine/")
@@ -590,10 +590,15 @@ function bareId(id: string): string {
 }
 
 function candidateKeys(id: string): string[] {
-  const n = normalizeId(id);
-  const aliased = normalizeId(providerAlias(n));
-  const keys = new Set<string>([n, aliased]);
-  if (n.includes("/")) keys.add(bareId(n));
+  const normalized = normalizeId(id);
+  const aliased = normalizeId(providerAlias(normalized));
+  const keys = new Set<string>([normalized, aliased]);
+  // :free commonly marks gateway access; retain exact key and add alias candidate.
+  for (const candidate of [normalized, aliased]) {
+    if (candidate.endsWith(":free")) keys.add(candidate.slice(0, -5));
+  }
+  if (normalized.includes("/")) keys.add(bareId(normalized));
+  if (aliased.includes("/")) keys.add(bareId(aliased));
   return [...keys].filter(Boolean);
 }
 
@@ -654,12 +659,14 @@ function lookupToolTemplate(ctx: EnrichContext, id: string, providerCfg?: Provid
   }
   const bare = bareId(id);
   if (ctx.toolProfile === "kilo" && /^kilo-free\//.test(normalizeId(id))) return undefined;
-  // Bare aliases are accepted only for explicitly recognized first-party IDs.
-  if (/^gpt-(?:6-(?:luna|sol|astra)|5\\.6-(?:luna|terra|sol)|5\\.5)$/.test(bare)) {
-    return ctx.templates?.get(bare);
+  // Thinking-effort route suffixes are not distinct canonical model identities.
+  const canonicalBare = bare.replace(/-(?:low|medium|high|xhigh)$/, "");
+  // Accept only recognized first-party model families; do not guess unrelated suffixes.
+  if (/^gpt-(?:6-(?:luna|sol|astra)|5\.6-(?:luna|terra|sol)|5\.5)$/.test(canonicalBare)) {
+    return ctx.templates?.get(canonicalBare);
   }
-  if (/^gemini-(?:3\\.(?:8|7|6)-flash|3\\.5-flash-lite|3\\.1-flash-lite)$/.test(bare)) {
-    return ctx.templates?.get(bare);
+  if (/^gemini-(?:3\.(?:8|7|6)-flash|3\.5-flash-lite|3\.1-flash-lite|3\.1-pro-preview|2\.5-pro)$/.test(canonicalBare)) {
+    return ctx.templates?.get(canonicalBare);
   }
   return undefined;
 }
@@ -773,35 +780,26 @@ export function convertModelsDevCost(raw: unknown): ModelCost | undefined {
   const obj = raw as Record<string, unknown>;
   const base = ratesFromUnknown(obj);
   if (!base) return undefined;
-
   const tiers: ModelCostTier[] = [];
   const seen = new Set<number>();
-
   const pushTier = (above: number, rates: ModelCostRates | undefined) => {
     if (!rates || !Number.isFinite(above) || above <= 0 || seen.has(above)) return;
     seen.add(above);
     tiers.push({ ...rates, inputTokensAbove: above });
   };
-
   if (Array.isArray(obj.tiers)) {
-    for (const t of obj.tiers) {
-      if (!t || typeof t !== "object") continue;
-      const tr = t as Record<string, unknown>;
-      const tierMeta = tr.tier && typeof tr.tier === "object" ? (tr.tier as Record<string, unknown>) : undefined;
-      const above =
-        numOr(tr.inputTokensAbove, NaN) ||
-        numOr(tierMeta?.size, NaN) ||
-        numOr(tr.context, NaN) ||
-        numOr(tr.threshold, NaN);
-      pushTier(above, ratesFromUnknown(tr));
+    for (const item of obj.tiers) {
+      if (!item || typeof item !== "object") continue;
+      const tier = item as Record<string, unknown>;
+      const meta = tier.tier && typeof tier.tier === "object" ? tier.tier as Record<string, unknown> : undefined;
+      const above = numOr(tier.inputTokensAbove, NaN) || numOr(meta?.size, NaN) || numOr(tier.context, NaN) || numOr(tier.threshold, NaN);
+      pushTier(above, ratesFromUnknown(tier));
     }
   }
-
-  // Legacy shortcut used by several providers in api.json.
-  if (obj.context_over_200k && typeof obj.context_over_200k === "object") {
-    pushTier(200_000, ratesFromUnknown(obj.context_over_200k as Record<string, unknown>));
+  for (const [key, threshold] of [["context_over_200k", 200_000], ["context_over_272k", 272_000], ["context_over_512k", 512_000]] as const) {
+    const tier = obj[key];
+    if (tier && typeof tier === "object") pushTier(threshold, ratesFromUnknown(tier as Record<string, unknown>));
   }
-
   tiers.sort((a, b) => a.inputTokensAbove - b.inputTokensAbove);
   return tiers.length > 0 ? { ...base, tiers } : base;
 }
@@ -1233,12 +1231,17 @@ export function enrichModel(
   const enrichCtx: EnrichContext = ctx instanceof Map ? { builtIn: ctx } : ctx;
   const families = resolvePreferredFamilies(m, opts);
 
-  const modelsDevSrc = lookupModelsDevModel(enrichCtx.modelsDev, m.id, families);
+  const canonicalLookupId = m.id.replace(/-(?:low|medium|high|xhigh)$/i, "");
+  const modelsDevSrc = lookupModelsDevModel(enrichCtx.modelsDev, m.id, families)
+    ?? (canonicalLookupId !== m.id ? lookupModelsDevModel(enrichCtx.modelsDev, canonicalLookupId, families) : undefined);
   const exactToolProviderMatch = enrichCtx.toolProfile !== undefined && enrichCtx.selectedToolProvider === opts?.providerName;
   const toolSrc = exactToolProviderMatch
-    ? lookupToolTemplate(enrichCtx, m.id, opts?.providerCfg) ?? lookupModelsDevModel(enrichCtx.toolIndex, m.id, families)
+    ? lookupToolTemplate(enrichCtx, m.id, opts?.providerCfg)
+      ?? (canonicalLookupId !== m.id ? lookupToolTemplate(enrichCtx, canonicalLookupId, opts?.providerCfg) : undefined)
+      ?? lookupModelsDevModel(enrichCtx.toolIndex, m.id, families)
     : undefined;
-  const builtInSrc = lookupBuiltInModel(enrichCtx.builtIn, m.id, families);
+  const builtInSrc = lookupBuiltInModel(enrichCtx.builtIn, m.id, families)
+    ?? (canonicalLookupId !== m.id ? lookupBuiltInModel(enrichCtx.builtIn, canonicalLookupId, families) : undefined);
 
   if (modelsDevSrc) {
     const patches = applyModelPatch(m, modelsDevSrc);

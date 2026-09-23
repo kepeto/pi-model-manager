@@ -38,15 +38,16 @@ All destructive ops ask for confirmation first.
 
 ### `/pim:sync` — fill missing model config
 
-Reads `models.json`, matches each custom model **by id** against models.dev first, then built-in models loaded at runtime, and fills fields you didn't set:
+Reads `models.json`, resolves each model by canonical identity against models.dev first, then pi built-ins loaded at runtime, and fills fields you didn't set:
 
 - `thinkingLevelMap` (from models.dev `reasoning_options` when available; enables `max` / `xhigh` thinking levels)
 - `cost` (from models.dev `api.json` pricing → pi `{input,output,cacheRead,cacheWrite[,tiers]}` USD/1M; fills missing or all-zero placeholders)
 - `compat` (from built-in pi metadata; merged, your values win)
 - `maxTokens`, `contextWindow`, `reasoning`, `input` (only `text`/`image`; pdf/audio/video from models.dev are stripped), `name`
 
-Only fills **missing** fields — anything set explicitly is preserved. Idempotent.
+Only fills **missing** fields — anything set explicitly is preserved. Idempotent. Matching removes only known hosting prefixes (for example `kilo-free/`, `nous-portal-free/`, `opencode-free/`) and retains semantic model variants. A `:free` suffix is kept for exact matching and also tried without the suffix as a secondary candidate. Ambiguous aliases are not guessed.
 
+`contextWindow` is the model's supported context limit, not a recommended prompt size or a pricing threshold. Cost tiers published by metadata sources remain in `cost.tiers`; sync does not reduce context to a price threshold.
 Matching prefers **canonical families** over reseller/gateway clones:
 
 | bare id example | preferred family |
@@ -78,18 +79,15 @@ You can also set an explicit family on the provider or model:
 ```
 
 ```
-/pim:sync                              # refresh models.dev and assigned tool-profile caches
-/pim:sync models                       # refresh/use models.dev only
-/pim:sync tool=kilo                    # overlay providers assigned metadataTool=kilo
-/pim:sync tool=codex                   # overlay providers assigned metadataTool=codex
-/pim:sync provider=cpa tool=kilo       # one-run Kilo override for provider cpa only
-/pim:sync models preview               # preview models.dev-only result
-/pim:sync provider=cpa tool=kilo preview
-/pim:sync status                       # show cache timestamps
-/pim:sync help                         # explain modes and provider assignment
+/pim:sync                              # refresh canonical models.dev metadata and pricing
+/pim:sync models                       # same canonical models.dev-only sync
+/pim:sync provider=cpa                # sync one provider
+/pim:sync preview                     # preview without writing models.json
+/pim:sync status                      # show metadata cache timestamps
+/pim:sync help                        # show matching and sync behavior
 ```
 
-Tab completion is available for `models`, `tool=...`, `provider=...`, `preview`, and `status`. Every sync refreshes models.dev and the selected/assigned tool catalog cache; `preview` skips only the models.json write. Existing metadata fields are replaced by the newly resolved model and route data on each sync.
+Every sync refreshes models.dev `models.json` + `api.json`; cached snapshots are used if a refresh fails. `preview` does not write `models.json`. `provider=<name>` scopes model updates.
 
 ### `/pim:headers` — manage request headers
 
@@ -167,10 +165,10 @@ In non-TUI modes (RPC/print), falls back to one-by-one Add/Skip prompts.
 - Optional `modelFamily` on provider or model overrides family inference.
 - `cost` is filled when missing or all zeros (common custom-provider placeholders); non-zero user costs are kept.
 - models.dev `models.json` has limits/modalities; pricing usually comes from `api.json` and is merged in.
-- `/pim:sync` always fetches models.dev `models.json` + `api.json`, replaces their cache snapshots, and resolves every configured model anew. Assigned tool profiles overlay only the effective `contextWindow`/`maxTokens` for a strongly matched provider route; other fields remain from models.dev or Pi built-ins.
-- Assign a profile per provider with `metadataTool` in `models.json` (`codex`, `kilo`, `gemini-cli`, or `antigravity`). A one-run override is scoped explicitly with `provider=<name> tool=<tool>`; `/pim:sync tool=kilo` applies only to providers already assigned/inferred as Kilo. Set `metadataTool` explicitly for predictable persistent behavior.
-- `/pim:sync models` refreshes and uses models.dev without tool overlays. Preview still refreshes/replaces source caches but does not write `models.json`; sync writes the refreshed resolution even if values match the previous file.
-- Kilo data comes from `https://api.kilo.ai/api/gateway/models`; route IDs must match before it overrides. Codex context profiles refresh from the public `openai/codex` bundled `models.json`; account-specific Codex runtime catalogs are not available without authentication. The bundled profile is isolated to providers assigned `metadataTool: "codex"`. Gemini CLI uses its official model token limits. Antigravity IDE/CLI effective context is not publicly specified, so its profile retains models.dev model limits and labels the harness cap unknown (no 135K managed-agent threshold is applied to the IDE/CLI).
+- `/pim:sync` refreshes models.dev `models.json` + `api.json` and resolves models by canonical identity; it does not select metadata based on `metadataTool` or require a tool assignment.
+- Hosting prefixes such as `kilo-free/`, `nous-portal-free/`, and `opencode-free/` are stripped only as route wrappers. Model variants and suffixes remain intact unless a canonical source matches them; ambiguous names are not guessed.
+- `contextWindow` stores the supported model context. Pricing tiers are kept separately in `cost.tiers` when present; a higher-price threshold does not clamp the supported context.
+- `/pim:sync models` is an alias for canonical models.dev-only sync. Preview refreshes source caches but does not write `models.json`; sync writes the refreshed resolution even if values match the previous file.
 - Metadata caches live in `~/.cache/pi-model-manager/`; `/pim:sync status` shows timestamps. On fetch failure, the last cached snapshot is retained and the report identifies its provenance.
 - Uses pi theme tokens for multi-select colors and focus state (`selectedBg`, `accent`, `success`, `dim`, `muted`, `warning`).
 - Focused rows use a full-width `selectedBg` band plus an accent bar (`▌`); checked rows use `[x]` without stealing focus.

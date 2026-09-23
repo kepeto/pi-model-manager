@@ -19,30 +19,19 @@ import { homedir } from "node:os";
 import {
   clearEnrichableFields,
   createEnrichContext,
-  createToolEnrichContext,
   getMetadataCacheStatus,
-  refreshKiloProfileCache,
-  refreshCodexProfileCache,
   enrichModel,
   type EnrichContext,
   type EnrichSource,
   type LikeModel,
   type ModelsJsonConfig,
   type ProviderConfig,
-  type ToolProfile,
 } from "./enrich.js";
 import { MultiSelect, type MultiSelectItem, type MultiSelectTheme } from "./multi-select.js";
 
 const MODELS_JSON = () => join(homedir(), ".pi", "agent", "models.json");
 
 const SYNC_MODEL_ARGUMENTS: AutocompleteItem[] = [
-  { value: "tool=kilo", label: "tool=kilo", description: "Use the matching Kilo Gateway route profile" },
-  { value: "tool=kilo preview", label: "tool=kilo preview", description: "Preview Kilo profile sync" },
-  { value: "tool=codex", label: "tool=codex", description: "Use Codex profile where provider metadataTool is codex" },
-  { value: "tool=codex preview", label: "tool=codex preview", description: "Preview Codex profile sync" },
-  { value: "tool=gemini-cli", label: "tool=gemini-cli", description: "Use Gemini CLI limits where provider metadataTool is gemini-cli" },
-  { value: "tool=gemini-cli preview", label: "tool=gemini-cli preview", description: "Preview Gemini CLI profile sync" },
-  { value: "tool=antigravity", label: "tool=antigravity", description: "Keep models.dev specs; Antigravity IDE/CLI cap unknown" },
   { value: "models", label: "models", description: "Use models.dev metadata only" },
   { value: "models preview", label: "models preview", description: "Preview models.dev-only sync" },
   { value: "preview", label: "preview", description: "Show what would change without writing models.json" },
@@ -259,6 +248,75 @@ function apiIdFromLabel(label: string): string {
   return label.split(" —")[0].trim();
 }
 
+const SETTINGS_JSON = () => join(homedir(), ".pi", "agent", "settings.json");
+const PRICE_COMPACTION_BUFFER = 16_384;
+const DEFAULT_COMPACTION_RESERVE = 16_384;
+const MIN_COMPACTION_RESERVE = 32_768;
+
+interface CompactionSettings {
+  reserveTokens?: number;
+  keepRecentTokens?: number;
+  modelOverrides?: Record<string, { reserveTokens?: number; keepRecentTokens?: number }>;
+  [key: string]: unknown;
+}
+
+function applyPricingCompactionOverrides(
+  models: Array<{ provider: string; model: LikeModel; threshold?: number }>,
+  report: string[],
+  preview: boolean,
+): void {
+  const path = SETTINGS_JSON();
+  let settings: Record<string, unknown> = {};
+  try {
+    if (existsSync(path)) settings = JSON.parse(readFileSync(path, "utf-8")) as Record<string, unknown>;
+  } catch (error) {
+    report.push(`Compaction settings not updated: cannot parse ${path}: ${(error as Error).message}`);
+    return;
+  }
+
+  const compaction = (settings.compaction && typeof settings.compaction === "object" && !Array.isArray(settings.compaction)
+    ? settings.compaction : {}) as CompactionSettings;
+  const overrides = { ...(compaction.modelOverrides ?? {}) };
+  let added = 0, unchanged = 0, skipped = 0;
+  for (const entry of models) {
+    if (!entry.threshold || !entry.model.contextWindow) {
+      skipped++;
+      continue;
+    }
+    const key = `${entry.provider}/${entry.model.id}`;
+    const targetTrigger = Math.max(1, entry.threshold - PRICE_COMPACTION_BUFFER);
+    const reserveTokens = Math.max(MIN_COMPACTION_RESERVE, entry.model.contextWindow - targetTrigger);
+    const existing = overrides[key] ?? {};
+    if (typeof existing.reserveTokens === "number") {
+      unchanged++;
+      report.push(`PRESERVED · ${key} (reserve ${existing.reserveTokens.toLocaleString()})`);
+      continue;
+    }
+    overrides[key] = { ...existing, reserveTokens };
+    added++;
+    report.push(`AUTO · ${key}`);
+    report.push(`  target ≈${targetTrigger.toLocaleString()} tokens; price tier ${entry.threshold.toLocaleString()}; reserve ${reserveTokens.toLocaleString()}`);
+  }
+  report.unshift(`COMPACTION · ${added} auto · ${unchanged} preserved · ${skipped} no verified threshold`);
+  if (preview || added === 0) return;
+  settings.compaction = { ...compaction, modelOverrides: overrides };
+  writeFileSync(path, JSON.stringify(settings, null, 2) + "\n", "utf-8");
+}
+
+function pricingThreshold(model: LikeModel): number | undefined {
+  const id = model.id.toLowerCase()
+    .replace(/^(?:kilo-free|nous-portal-free|opencode-free|openrouter-free)\//, "")
+    .replace(/^codex\//, "")
+    .replace(/:free$/, "");
+  // Official provider thresholds only; do not treat reseller/gateway tiers as canonical.
+  if (/^gpt-(?:5\.6-(?:sol|terra|luna)|6-(?:sol|luna|astra))$/.test(id)) return 272_000;
+  if (/^gemini-(?:2\.5-pro|3\.1-pro(?:-preview)?)(?:-(?:low|high))?$/.test(id)) return 200_000;
+  if (/^minimax-m3(?:-.*)?$/.test(id)) return 512_000;
+  if (/^claude-(?:sonnet-4(?:-\d+)?|opus-4(?:-\d+)?)(?:-\d{8})?$/.test(id)) return 200_000;
+  return undefined;
+}
+
+
 function sourceLabel(src: EnrichSource): string {
   return src.sourceLabel ?? src.provider ?? "metadata";
 }
@@ -267,17 +325,8 @@ function sourceRef(src: EnrichSource): string {
   return `${sourceLabel(src)}/${src.id}`;
 }
 
-function inferToolForProvider(name: string, cfg: ProviderConfig): ToolProfile | undefined {
-  if (cfg.metadataTool) return cfg.metadataTool;
-  const key = `${name} ${cfg.baseUrl ?? ""} ${cfg.api ?? ""}`.toLowerCase();
-  if (/kilo/.test(key) || (cfg.models ?? []).some((model) => /^kilo-free\//i.test(model.id))) return "kilo";
-  if (/antigravity|googleapis\.com\/v1beta\/interactions/.test(key)) return "antigravity";
-  if (/gemini-cli/.test(key)) return "gemini-cli";
-  if (/codex/.test(key)) return "codex";
-  return undefined;
-}
 
-/** Enrich every model under a provider; return report lines + counters. */
+/** Enrich provider models and return structured rows for a compact sync report. */
 function enrichProvider(
   provName: string,
   provCfg: ProviderConfig,
@@ -288,25 +337,36 @@ function enrichProvider(
   let changed = 0, matched = 0, noMatch = 0;
   const models = provCfg.models;
   if (!Array.isArray(models)) return { report, changed, matched, noMatch };
+  type SyncRow = { status: string; id: string; source: string; fields: string };
+  const matchedRows: SyncRow[] = [];
+  const unmatchedRows: SyncRow[] = [];
   for (const m of models) {
     if (opts?.force) clearEnrichableFields(m);
-    const [patches, src] = enrichModel(m, enrichCtx, {
-      providerName: provName,
-      providerCfg: provCfg,
-    });
+    const [patches, src] = enrichModel(m, enrichCtx, { providerName: provName, providerCfg: provCfg });
     if (!src) {
       noMatch++;
-      report.push(`· ${provName}/${m.id} — no models.dev or built-in match, skipped`);
+      unmatchedRows.push({ status: "NO MATCH", id: m.id, source: "—", fields: "metadata skipped" });
       continue;
     }
     matched++;
     if (patches.length > 0) {
       changed++;
-      report.push(`✓ ${provName}/${m.id} ← ${sourceRef(src)}  +${patches.join(",")}`);
+      matchedRows.push({ status: "UPDATED", id: m.id, source: sourceRef(src), fields: patches.join(", ") });
     } else {
-      report.push(`= ${provName}/${m.id} ← ${sourceRef(src)}  already complete`);
+      matchedRows.push({ status: "CURRENT", id: m.id, source: sourceRef(src), fields: "no metadata changes" });
     }
   }
+  const formatRows = (title: string, items: SyncRow[]): void => {
+    if (!items.length) return;
+    report.push("", `${title} (${items.length})`, "─".repeat(Math.min(title.length + 8, 40)));
+    for (const row of items) {
+      report.push(`${row.status} · ${row.id}`);
+      if (row.source !== "—") report.push(`  source: ${row.source}`);
+      report.push(`  ${row.fields}`);
+    }
+  };
+  formatRows("MATCHED", matchedRows);
+  formatRows("NO MATCH", unmatchedRows);
   return { report, changed, matched, noMatch };
 }
 
@@ -552,7 +612,7 @@ export default function (pi: ExtensionAPI) {
 
   // ===================== /pim:sync =====================
   pi.registerCommand("pim:sync", {
-    description: "Refresh metadata caches and sync provider limits from per-provider tool profiles, or models.dev only.",
+    description: "Refresh canonical model metadata and sync pricing-aware limits.",
     getArgumentCompletions: completeSyncModelArgs,
     handler: async (args: string, ctx) => {
       const path = MODELS_JSON();
@@ -562,11 +622,8 @@ export default function (pi: ExtensionAPI) {
       const rawArgs = args ?? "";
       const dryRun = /\b(preview|dry-run|dryrun)\b/i.test(rawArgs);
       const force = /\bforce\b/i.test(rawArgs);
-      const modelsOnly = /\bmodels\b/i.test(rawArgs);
       const statusOnly = /\bstatus\b/i.test(rawArgs);
       const helpOnly = /\bhelp\b/i.test(rawArgs);
-      const toolMatch = rawArgs.match(/\btool=(codex|kilo|gemini-cli|antigravity)\b/i);
-      const explicitTool = toolMatch?.[1]?.toLowerCase() as ToolProfile | undefined;
       const providerMatch = rawArgs.match(/\bprovider=([a-z0-9][a-z0-9._-]*)\b/i);
       const selectedProvider = providerMatch?.[1];
       let config: ModelsJsonConfig;
@@ -582,7 +639,7 @@ export default function (pi: ExtensionAPI) {
       if (force && !dryRun) {
         const ok = await ui.confirm(
           "Refresh metadata and replace the source cache?",
-          "Fetch current models.dev and selected tool catalogs, replace their cache snapshots, then re-enrich models. Tool context profiles only apply to the provider assigned that tool.",
+          "Fetch canonical models.dev metadata and price tiers, then re-enrich configured models.",
         );
         if (!ok) { ui.notify("Cancelled.", "info"); return; }
       }
@@ -594,13 +651,13 @@ export default function (pi: ExtensionAPI) {
       }
       if (helpOnly) {
         ui.notify([
-          "/pim:sync — refresh models.dev plus assigned per-provider tool profiles; write resolved models.json",
-          "/pim:sync models — refresh/use models.dev only",
-          "/pim:sync tool=kilo|codex|gemini-cli|antigravity — override only providers assigned that metadataTool",
-          "/pim:sync provider=<name> tool=<tool> — one-run override for exactly one provider",
-          "/pim:sync preview — fetch/replace caches and preview without writing models.json",
+          "/pim:sync — refresh models.dev canonical model metadata/pricing and resolve every configured model by identity",
+          "/pim:sync models — alias for canonical models.dev-only sync",
+          "/pim:sync provider=<name> — sync one provider",
+          "/pim:sync preview — preview metadata and pricing-aware compaction overrides without writing files",
+          "/pim:sync force — clear enrichable metadata before matching",
           "/pim:sync status — inspect metadata cache timestamps",
-          "Set providers.<name>.metadataTool in models.json for persistent per-provider tool assignment.",
+          "Status displays the model's full contextWindow; pricing compaction targets are separate per-model Pi overrides.",
         ].join("\n"), "info");
         return;
       }
@@ -609,48 +666,28 @@ export default function (pi: ExtensionAPI) {
         ui.notify(status.join("\n"), "info");
         return;
       }
-      if (modelsOnly) await createEnrichContext(ctx, customNames, { forceRefresh: true });
-      else await Promise.all([
-        createEnrichContext(ctx, customNames, { forceRefresh: true }),
-        ...Object.entries(config.providers)
-          .map(([providerName, providerCfg]) => explicitTool ?? providerCfg.metadataTool ?? inferToolForProvider(providerName, providerCfg))
-          .filter((tool): tool is ToolProfile => Boolean(tool))
-          .filter((tool, index, tools) => tools.indexOf(tool) === index)
-          .map((tool) => {
-            if (tool === "kilo") return refreshKiloProfileCache(true).catch(() => undefined);
-            if (tool === "codex") return refreshCodexProfileCache(true).catch(() => undefined);
-            return Promise.resolve();
-          }),
-      ]);
-      const baseCtx = await createEnrichContext(ctx, customNames, { forceRefresh: false });
+      const baseCtx = await createEnrichContext(ctx, customNames, { forceRefresh: true });
       let changed = 0, matched = 0, noMatch = 0;
       const all: ReturnType<typeof enrichProvider>[] = [];
+      const compactionModels: Array<{ provider: string; model: LikeModel; threshold?: number }> = [];
       for (const [provName, provCfg] of Object.entries(config.providers)) {
-        const isSelectedProvider = !selectedProvider || selectedProvider === provName;
-        const assignedTool = provCfg.metadataTool ?? inferToolForProvider(provName, provCfg);
-        const profile = modelsOnly ? undefined : selectedProvider
-          ? isSelectedProvider ? explicitTool ?? assignedTool : assignedTool
-          : explicitTool ? (assignedTool === explicitTool ? explicitTool : undefined) : assignedTool;
-        const enrichCtx = profile
-          ? await createToolEnrichContext(ctx, customNames, profile, provName, { forceRefresh: true })
-          : baseCtx;
-        const r = enrichProvider(provName, provCfg, enrichCtx, { force });
+        if (selectedProvider && selectedProvider !== provName) continue;
+        for (const model of provCfg.models ?? []) {
+          compactionModels.push({ provider: provName, model, threshold: pricingThreshold(model) });
+        }
+        const r = enrichProvider(provName, provCfg, baseCtx, { force });
         all.push(r);
         changed += r.changed;
         matched += r.matched;
         noMatch += r.noMatch;
       }
-
       if (!dryRun) saveConfig(path, config);
-
       const report = all.flatMap((r) => r.report);
-      const modeTag = [
-        dryRun ? "preview · models.json not written" : "source caches refreshed",
-        modelsOnly ? "models.dev only" : selectedProvider ? `provider=${selectedProvider}${explicitTool ? ` tool=${explicitTool}` : ""}` : explicitTool ? `tool=${explicitTool} on assigned providers` : "per-provider tool profiles",
-      ].filter(Boolean).join(" · ");
+      applyPricingCompactionOverrides(compactionModels, report, dryRun);
+      const modeTag = dryRun ? "preview · settings/models.json not written" : "canonical model metadata + compaction synced";
       const head =
-        `[${modeTag}] /pim:sync: matched ${matched} · enriched ${changed} · no match ${noMatch}` +
-        (!dryRun ? `\nWrote models.json. ${formatReloadHint()}` : "");
+        `[${modeTag}] /pim:sync · matched ${matched} · updated ${changed} · unmatched ${noMatch}` +
+        (!dryRun ? `\nWrote models.json and settings.json. ${formatReloadHint()}` : "");
       ui.notify([head, "", ...report].join("\n"), changed > 0 || dryRun ? "info" : "warning");
     },
   });
